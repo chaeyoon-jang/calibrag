@@ -24,7 +24,7 @@ pip install -r requirements.txt
 
 ### **1. Create Open-ended Questions**
 ```bash
-python -m experiments.api --data_dir <data must have columns x> --type oe
+python -m experiments.api --data_dir ./data/dev --type oe
 ```
 
 ### **2. Generate RAG Data**
@@ -125,7 +125,7 @@ python -m experiments.train.train_reranking_model \
 
 ### **1. Create Open-ended Questions**
 ```bash
-python -m experiments.api --data_dir <data must have columns x> --type oe
+python -m experiments.api --data_dir ./data/test --type oe
 ```
 
 ### **2. Generate RAG Data**
