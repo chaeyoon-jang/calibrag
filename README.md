@@ -12,6 +12,7 @@ This repository provides the implementation of [Calibrated Decision-Making throu
 All experiments were conducted on a single NVIDIA RTX A6000 GPU.
 
 ```bash
+cd code
 conda create -n calibrag python=3.9 -y
 conda activate calibrag
 pip install -r requirements.txt
