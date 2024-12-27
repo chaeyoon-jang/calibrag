@@ -1,6 +1,9 @@
-# **Calibrated Decision-Making through Large Language Model-Assisted Retrieval**
+# **Calibrated Decision-Making through Large LLM-Assisted Retrieval**
 
-This repository provides the implementation of **Calibrated Decision-Making through Large Language Model-Assisted Retrieval (CalibRAG)**. CalibRAG enhances decision-making accuracy by leveraging the nuanced guidance of Retrieval-Augmented Generation (RAG) and uncertainty calibration techniques.
+This repository provides the implementation of [Calibrated Decision-Making through LLM-Assisted Retrieval](https://arxiv.org/abs/2411.08891).
+
+### Abstract
+<sub>Recently, large language models (LLMs) have been increasingly used to support various decision-making tasks, assisting humans in making informed decisions. However, when LLMs confidently provide incorrect information, it can lead humans to make suboptimal decisions. To prevent LLMs from generating incorrect information on topics they are unsure of and to improve the accuracy of generated content, prior works have proposed Retrieval Augmented Generation (RAG), where external documents are referenced to generate responses. However, traditional RAG methods focus only on retrieving documents most relevant to the input query, without specifically aiming to ensure that the human user's decisions are well-calibrated. To address this limitation, we propose a novel retrieval method called Calibrated Retrieval-Augmented Generation (CalibRAG), which ensures that decisions informed by the retrieved documents are well-calibrated. Then we empirically validate that CalibRAG improves calibration performance as well as accuracy, compared to other baselines across various datasets.</sub>
 
 ---
 
