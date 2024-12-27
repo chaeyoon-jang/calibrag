@@ -28,9 +28,21 @@ python -m experiments.api --data_dir <data must have columns x> --type oe
 ```
 
 ### **2. Generate RAG Data**
-```bash
-python -m experiments.retrieve --dataset dev
-```
+
+1. **Download Preprocessed Passage Data (DPR Format)**   
+   ```bash
+   wget https://dl.fbaipublicfiles.com/dpr/wikipedia_split/psgs_w100.tsv.gz
+   ```
+
+2. **Download Generated Embeddings (Contriever)** 
+   ```bash
+   wget https://dl.fbaipublicfiles.com/contriever/embeddings/contriever-msmarco/wikipedia_embeddings.tar
+   ```
+
+3. **Run Retrieval on the Dev Dataset**  
+    ```bash
+    python -m experiments.retrieve --dataset dev
+    ```
 
 ### **3. Generate LLM Outputs with Uncertainty**
 ```bash
@@ -118,7 +130,7 @@ python -m experiments.api --data_dir <data must have columns x> --type oe
 
 ### **2. Generate RAG Data**
 ```bash
-python -m experiments.retrieve --dataset test
+   python -m experiments.retrieve --dataset test
 ```
 
 ### **3. Produce LLM Outputs with Uncertainty**
