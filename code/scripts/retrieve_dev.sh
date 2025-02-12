@@ -1,0 +1,2 @@
+python -m experiments.retrieve --retrieval_method <RETREIVAL METHOD> --data_name 'oe_base_train' --qa_data './data/dev/raw/oe_base_train.csv' --output_folder './data/dev/rag'
+python -m experiments.retrieve --retrieval_method <RETREIVAL METHOD> --data_name 'oe_base_valid' --qa_data './data/dev/raw/oe_base_valid.csv' --output_folder './data/dev/rag'

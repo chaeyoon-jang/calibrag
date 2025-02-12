@@ -1,53 +1,40 @@
 import os
-import wandb
-from dataclasses import dataclass, field
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import pandas as pd 
 from tqdm.auto import tqdm
+from datasets import Dataset
+from dataclasses import dataclass, field
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import default_collate
-from peft import PeftModel
+
 from transformers.trainer import (
     TRAINING_ARGS_NAME,
     logger,
     Trainer,
-    TrainingArguments,
-    TrainerCallback
+    TrainingArguments
 )
-from torch.distributions import Categorical, kl_divergence
 from transformers.modeling_utils import unwrap_model
-import torch
-from datasets import Dataset
-from src import (AcceleratorState,
-                 create_model, 
-                 create_tokenizer,
-                 get_lora_model,
-                 get_classifier_head,
-                 LabeledStringDataCollator,
-                 entrypoint,
-                 get_token_vec,
-                 QZ_PRED_INSTRUCTION,
-                 QZ_PRED_PROMPT)
 
-from datasets import load_dataset
-
-import pandas as pd 
-import warnings 
-warnings.filterwarnings("ignore", category=UserWarning, module="bitsandbytes.autograd._functions")
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
-class WandbConfigUpdateCallback(TrainerCallback):
-    def __init__(self, **config):
-        self._config = config
-
-    def on_train_begin(self, _args, state, _control, **_):
-        if state.is_world_process_zero:
-            wandb.config.update(self._config, allow_val_change=True)
-
-            del self._config
-            
-            
+from src.logging import (
+    entrypoint,
+    WandbConfigUpdateCallback
+)
+from src.distributed import AcceleratorState
+from src.llm_model_utils import (
+    create_model,
+    create_tokenizer
+)
+from src.peft_utils import (
+    get_lora_model,
+    get_classifier_head
+)
+from src.generate_utils import (
+    LabeledStringDataCollator
+)
+ 
 class ClassificationTuner(Trainer):
     WEIGHTS_NAME = "classifier_model.bin"
 
@@ -67,7 +54,7 @@ class ClassificationTuner(Trainer):
         gradient_accumulation_steps: int = field(default=1)
         report_to: str = field(default="wandb")
         ## Custom Args.
-        target_layer: int = field(default=-1)
+        target_layer: int = field(default=-2)
         with_lora: bool = field(default=False)
 
     def __init__(
@@ -81,10 +68,8 @@ class ClassificationTuner(Trainer):
     ):
         args.label_names = train_dataset.column_names
         
-        self.base_instruction = QZ_PRED_INSTRUCTION
-        self.base_prompt = QZ_PRED_PROMPT
         self.input_prediction = input_prediction
-        self._collate_fn = LabeledStringDataCollator(tokenizer, self.base_instruction)
+        self._collate_fn = LabeledStringDataCollator(tokenizer)
 
         self.classifier_model = classifier_model
 
@@ -102,32 +87,12 @@ class ClassificationTuner(Trainer):
 
         return super()._wrap_model(*args, **kwargs)
 
-    def prepare_inputs(self, model, inputs):
-        prompts = [self.base_prompt.replace("<question>", q).replace("<title>", z_t).replace("context", z)\
-            for q, z, z_t in zip(inputs['q'], inputs['z'], inputs['z_t'])]
-
-        predictions = inputs['z_pred']
-        q_labels = inputs['c'].clone().detach().long()
-        q_labels = q_labels.to(self.accelerator.device)
-        
-        targets = inputs['y']
-        
-        return prompts, targets, predictions, q_labels
-
     def prepare_class_inputs(
-        self, model, inputs, targets, predictions, class_labels, eval_mode=False
+        self, model, inputs, eval_mode=False
     ):
-        
-        if self.input_prediction:
-            class_inputs = {
-                k: v.to(self.accelerator.device)
-                for k, v in self._collate_fn(inputs, predictions).items()
-            }
-        else:
-            class_inputs = {
-                k: v.to(self.accelerator.device)
-                for k, v in self._collate_fn(inputs).items()
-            }
+        class_inputs = {
+            k: v.to(self.accelerator.device)
+            for k, v in self._collate_fn(inputs).items()}
             
         inference_mode = (not self.args.with_lora) or eval_mode
 
@@ -141,23 +106,19 @@ class ClassificationTuner(Trainer):
         return class_inputs
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        inputs, targets, predictions, class_labels = self.prepare_inputs(model, inputs)
-
-        class_inputs = self.prepare_class_inputs(
-            model, inputs, targets, predictions, class_labels
-        )
+        
+        class_labels = inputs['correct']
+        inputs = inputs['z_prompt']     
+           
+        class_inputs = self.prepare_class_inputs(model, inputs)
 
         class_logits = self.classifier_model(class_inputs)
-
-        class_counts = torch.tensor([0.41, 0.59]) 
-        class_weights = 1.0 / class_counts  
-
-        loss = F.cross_entropy(class_logits, class_labels, weight=class_weights.to(class_logits.device))
+        loss = F.cross_entropy(class_logits, class_labels)
 
         loss_metrics = {
             "class_loss": loss.detach().item(),
         }
-
+ 
         if (self.state.global_step + 1) % self.args.logging_steps == 0:
             self.log(loss_metrics)
 
@@ -172,12 +133,12 @@ class ClassificationTuner(Trainer):
         all_labels, all_logits = [], []
 
         for inputs in tqdm(eval_dataloader, leave=False):
-            inputs, targets, predictions, class_labels = self.prepare_inputs(
-                self.model, inputs
-            )
-
+            
+            class_labels = inputs['correct']
+            inputs = inputs['z_prompt']
+            
             class_inputs = self.prepare_class_inputs(
-                self.model, inputs, targets, predictions, class_labels, eval_mode=True
+                self.model, inputs, eval_mode=True
             )
 
             class_logits = self.classifier_model(class_inputs)
@@ -264,12 +225,11 @@ def main(
     seed=137,
     log_dir=None,
     dataset=None,
-    data_dir=None,
+    data_dir="./data/processed/calibrag/bm25",
     input_prediction=False,
     max_token_length=None,
     num_workers=4,
-    use_dataset_cache=True,
-    model_name=None,
+    model_name="Meta-Llama-3.1-8B-Instruct",
     int8=True,
     lora_rank=8,
     lora_alpha=32,
@@ -279,7 +239,7 @@ def main(
     batch_size=4,
     warmup_ratio=0.0,
     lr=1e-4,
-    max_steps=500000,
+    max_steps=10000,
     gradient_accumulation_steps=1,
 ):
     accelerator = AcceleratorState()
@@ -301,9 +261,9 @@ def main(
     )
 
     with accelerator.main_process_first():
-        train_data = pd.read_csv("./data_final/dev/rag_train_final.csv")
+        train_data = pd.read_csv(os.path.join(f"{data_dir}", "train.csv"))
         train_data = train_data.sample(frac=1, random_state=seed).reset_index(drop=True)
-        valid_data = pd.read_csv("./data_final/dev/rag_valid_final.csv")
+        valid_data = pd.read_csv(os.path.join(f"{data_dir}", "valid.csv"))
 
         train_data = Dataset.from_pandas(train_data)
         valid_data = Dataset.from_pandas(valid_data)

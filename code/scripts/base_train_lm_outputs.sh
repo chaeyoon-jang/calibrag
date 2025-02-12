@@ -1,0 +1,1 @@
+python -m experiments.make_lm_outputs --batch_size 16 --max_new_tokens 50 --model_name "Meta-Llama-3.1-8B-Instruct" --inference False --c_type "base" --seed 0 --temperature 1.1 --top_p 0.9

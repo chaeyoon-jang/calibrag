@@ -1,36 +1,29 @@
-# base packages
+################################################################################
+## This file covers two main cases:
+# 1. Generating 'y_pred' form 'x' and generated context 'z'. (Infernece=False)
+# 2. Generating 'y_pred' form 'x', 'z' and confidence 'c'. (Infernece=True)
+################################################################################
 import os
-import json
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import wandb
-import torch
-import logging
 import pandas as pd
-from tqdm.auto import tqdm
 from datasets import Dataset
 from transformers import GenerationConfig, set_seed
 
-# custum packages
-from src import (
-    entrypoint, 
-    generate_outputs,
+from src.logging import entrypoint
+from src.generate_utils import generate_outputs
+from src.llm_model_utils import (
     create_model,
-    create_tokenizer,
-    get_loader,
-    XZ_PRED_Y_INSTRUCTION,
+    create_tokenizer
+)
+from src.llm_data_utils import get_loader
+from src.prompt_hub import (
     XZ_PRED_Y_PROMPT,
-    XZ_PRED_Y_INSTRUCTION_EVAL,
-    XZ_PRED_Y_PROMPT_EVAL
+    XZ_PRED_Y_PROMPT_EVAL,
+    number_to_uc
 )
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-number_to_uc = ["Unlikely", "Doubtful", "Uncertain", 
-                "Ambiguous", "Probable", "Likely", "Possible", 
-                "Specified","Confirmed", "Certain", "Inevitable"]
-
-uc_to_number = {"Unlikely": 0, "Doubtful": 1, "Uncertain": 2, 
-            "Ambiguous": 3, "Probable": 4, "Likely": 5, "Possible":6, 
-            "Specified":7,"Confirmed":8, "Certain":9, "Inevitable":10}
 
 def decision_generate(
     accelerator,
@@ -40,27 +33,32 @@ def decision_generate(
     batch_size,
     generation_config,
     inference=False,
-    uc_type="ct"):
+    c_type="ct"):
     
     if inference:
         
-        base_instruction = XZ_PRED_Y_INSTRUCTION_EVAL
         base_prompt = XZ_PRED_Y_PROMPT_EVAL
         
-        if uc_type == "ling":
-            dataset['uc'] = [f'{number_to_uc[int(uc)]}' for uc in dataset['uc']]
+        if c_type == "ling":
+            dataset['c'] = [f'{number_to_uc[int(uc)]}' for uc in dataset['c']]
         
-        elif uc_type == "number":
-            dataset['uc'] = [f'{uc} (0-10)' for uc in dataset['uc']]
+        elif c_type == "number":
+            dataset['c'] = [f'{uc} (0-10)' for uc in dataset['c']]
                 
         else:
             try:
-                dataset['uc'] = [f"{round(n*100,2)} (0-100)" for n in list(dataset['uc'])]
+                dataset['c'] = [f"{round(n*100,2)} (0-100)" 
+                                 for n in list(dataset['c'])]
             except:
-                dataset['uc'] = [n for n in list(dataset['uc'])]
+                dataset['c'] = [n for n in list(dataset['c'])]
                 
-        dataset['decision_prompt'] = [base_prompt.replace("<question>", str(x)).replace("<context>", str(z_pred)).replace("<confidence>", str(uc))\
-                for x, z_pred, uc in zip(list(dataset['x']), list(dataset['z_pred']), list(dataset['uc']))]
+        dataset['y_pred_prompt'] = [base_prompt
+                                    .replace("<question>", str(x))
+                                    .replace("<context>", str(z))
+                                    .replace("<confidence>", str(uc)) 
+                                    for x, z, uc in zip(list(dataset['x']),
+                                                             list(dataset['z']),
+                                                             list(dataset['c']))]
         
         loader = get_loader(Dataset.from_pandas(dataset), batch_size=batch_size,
                     pin_memory=True, accelerator=accelerator)
@@ -70,18 +68,19 @@ def decision_generate(
                                    tokenizer,
                                    loader,
                                    generation_config,
-                                   base_instruction,
-                                   "decision_prompt")
+                                   "y_pred_prompt")
         
         dataset['y_pred'] = outputs 
     
     else:
         
-        base_instruction = XZ_PRED_Y_INSTRUCTION
         base_prompt = XZ_PRED_Y_PROMPT 
         
-        dataset['decision_prompt'] = [base_prompt.replace("<question>", x).replace("<context>", z_pred)\
-            for x, z_pred in zip(list(dataset['x']), list(dataset['z_pred']))]
+        dataset['y_pred_prompt'] = [base_prompt
+                                    .replace("<question>", x)
+                                    .replace("<context>", z)
+                                    for x, z in zip(list(dataset['x']), 
+                                                    list(dataset['z']))]
  
         loader = get_loader(Dataset.from_pandas(dataset), batch_size=batch_size,
                     pin_memory=True, accelerator=accelerator)
@@ -91,8 +90,7 @@ def decision_generate(
                                    tokenizer,
                                    loader,
                                    generation_config,
-                                   base_instruction,
-                                   "decision_prompt")
+                                   "y_pred_prompt")
         
         dataset['y_pred'] = outputs 
         
@@ -108,12 +106,11 @@ def main(
     use_dataset_cache: bool = True,
     model_name: str = "Meta-Llama-3.1-8B-Instruct",
     max_new_tokens: int = 50,
-    do_sample: bool = False,
     temperature: float = 1.0,
     top_p: float = 1.0,
     batch_size: int = 1,
     inference: bool = False,
-    uc_type: str = "ct",
+    c_type: str = "ct",
 ):
     
     set_seed(seed)
@@ -131,7 +128,7 @@ def main(
     if accelerator.is_main_process:
         wandb.config.update(config)
         
-    # loading datasets
+    ############################# Loading datasets #############################
     if os.path.exists(data_dir):
         with accelerator.main_process_first():
             all_data_path = os.listdir(data_dir)
@@ -142,7 +139,7 @@ def main(
     else:
         raise FileNotFoundError(f"No files found in the folder: {data_dir}")  
     
-    # loading tokenizer & model
+    ######################## Loading tokenizer & model #########################
     tokenizer = create_tokenizer(
         model_name
     )
@@ -161,7 +158,7 @@ def main(
         top_p=top_p
     )
     
-    # start generation
+    ########################### Generating outputs #############################
     model.eval()        
     for data, data_path in zip(all_data, all_data_path):
         
@@ -173,10 +170,10 @@ def main(
             batch_size,
             generation_config,
             inference,
-            uc_type)
+            c_type)
         
         os.makedirs(f"{log_dir}/decision", exist_ok=True)
-        df.to_csv(os.path.join(f"{log_dir}/decision", data_path))
+        df.to_csv(os.path.join(f"{log_dir}/decision", data_path), index=False)
         
 
 if __name__ == "__main__":

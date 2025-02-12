@@ -12,7 +12,7 @@ import logging
 from collections import defaultdict
 import torch.distributed as dist
 
-from .dist_utils import *
+from .dist_utils import get_world_size, get_rank
 
 logger = logging.getLogger(__name__)
 
@@ -228,8 +228,7 @@ def load_passages(path):
     if not os.path.exists(path):
         logger.info(f"{path} does not exist")
         return
-    logger.info(f"Loading passages from: {path}")    
-
+    logger.info(f"Loading passages from: {path}")
     passages = []
     with open(path) as fin:
         if path.endswith(".jsonl"):

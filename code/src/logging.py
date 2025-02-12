@@ -5,6 +5,7 @@ import logging.config
 import os
 import wandb
 
+from transformers.trainer import TrainerCallback
 from .distributed import Accelerator, AcceleratorState
 
 
@@ -228,3 +229,14 @@ def entrypoint(main=None, with_accelerator=False, with_logging=True, with_wandb=
     if main:
         return _decorator(main)
     return _decorator
+
+
+class WandbConfigUpdateCallback(TrainerCallback):
+    def __init__(self, **config):
+        self._config = config
+
+    def on_train_begin(self, _args, state, _control, **_):
+        if state.is_world_process_zero:
+            wandb.config.update(self._config, allow_val_change=True)
+
+            del self._config

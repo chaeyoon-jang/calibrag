@@ -1,0 +1,1 @@
+python -m experiments.api --data_dir <YOUR_FILE_DIRECTORY> --type "eval" --batch_size 48 --multiple False

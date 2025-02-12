@@ -1,216 +1,238 @@
-import os
-import argparse
-import csv
+################################################################################
+## This file covers the retrieval process using open-ended query 'q'.
+## The retrieval process is conducted using BM25, CDE, and Contriever.
+################################################################################
 import json
-import logging
-import pickle
-import time
-import glob
-from pathlib import Path
-
-import pandas as pd
-import numpy as np
+import os
 import torch
-import transformers
+import random
+import numpy as np
+import pandas as pd 
+import argparse
 
-from src import load_retriever, load_data, load_passages, normalize, Indexer
+from transformers import set_seed
+from tqdm.autonotebook import tqdm 
+from transformers import AutoTokenizer, AutoModel
+from beir.retrieval.evaluation import EvaluateRetrieval
+from beir.retrieval.search.lexical import BM25Search as BM25
+from beir.retrieval.search.dense import DenseRetrievalExactSearch as DRES
 
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
+from src.rag_utils import (
+    load_retriever,
+    DenseEncoderModel,
+    CDEModel,
+    load_passages
+)
 
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+def generate_dataset_embeddings(minicorpus_docs,
+                                model,
+                                tokenizer,
+                                batch_size):
 
-def embed_queries(per_gpu_batch_size,
-                  lowercase,
-                  normalize_text,
-                  question_maxlength,
-                  queries,
-                  model, 
-                  tokenizer):
+    ## Stage 1: Gather dataset embeddings.
+    minicorpus_docs = tokenizer(
+        ['search_document: ' + minicorpus_docs[doc_id]['text']\
+            for doc_id in minicorpus_docs.keys()],
+        truncation=True,
+        padding=True,
+        max_length=512,
+        return_tensors='pt'
+    )
+    
+    dataset_embeddings = []
     model.eval()
-    embeddings, batch_question = [], []
-    with torch.no_grad():
-
-        for k, q in enumerate(queries):
-            if lowercase:
-                q = q.lower()
-            if normalize_text:
-                q = normalize(q)
-            batch_question.append(q)
-
-            if len(batch_question) == per_gpu_batch_size or k == len(queries) - 1:
-
-                encoded_batch = tokenizer.batch_encode_plus(
-                    batch_question,
-                    return_tensors="pt",
-                    max_length=question_maxlength,
-                    padding=True,
-                    truncation=True,
-                )
-                encoded_batch = {k: v.cuda() for k, v in encoded_batch.items()}
-                output = model(**encoded_batch)
-                embeddings.append(output.cpu())
-
-                batch_question = []
-
-    embeddings = torch.cat(embeddings, dim=0)
-    print(f"Questions embeddings shape: {embeddings.size()}")
-
-    return embeddings.numpy()
+    for i in tqdm(range(0, len(minicorpus_docs["input_ids"]), batch_size)):
+        batch = {k: v[i:i+batch_size].cuda() for k, v in minicorpus_docs.items()}
+        with torch.no_grad():
+            embeddings = model.first_stage_model(**batch)
+            dataset_embeddings.append(embeddings.cpu())
+            
+    return torch.cat(dataset_embeddings)
 
 
-def index_encoded_data(index, embedding_files, indexing_batch_size):
-    allids = []
-    allembeddings = np.array([])
+def parse_args():
     
-    for i, file_path in enumerate(embedding_files):
-        
-        print(f"Loading file {file_path}")
-        with open(file_path, "rb") as fin:
-            ids, embeddings = pickle.load(fin)
-
-        allembeddings = np.vstack((allembeddings, embeddings)) if allembeddings.size else embeddings
-        allids.extend(ids)
-        
-        while allembeddings.shape[0] > indexing_batch_size:
-            allembeddings, allids = add_embeddings(index, allembeddings, allids, indexing_batch_size)
-
-    while allembeddings.shape[0] > 0:
-        allembeddings, allids = add_embeddings(index, allembeddings, allids, indexing_batch_size)
-
-    print("Data indexing completed.")
-
-
-def add_embeddings(index, embeddings, ids, indexing_batch_size):
-    end_idx = min(indexing_batch_size, embeddings.shape[0])
-    ids_toadd = ids[:end_idx]
-    embeddings_toadd = embeddings[:end_idx]
-    ids = ids[end_idx:]
-    embeddings = embeddings[end_idx:]
-    index.index_data(ids_toadd, embeddings_toadd)
-    return embeddings, ids
-
-
-def add_passages(queries, passages, top_passages_and_scores):
-    assert len(queries) == len(top_passages_and_scores)
-    merged_data = []
-    for i, q in enumerate(queries):
-        results_and_scores = top_passages_and_scores[i]
-        docs = [passages[doc_id] for doc_id in results_and_scores[0]]
-        scores = [str(score) for score in results_and_scores[1]]
-        ctxs_num = len(docs)
-        merged_data.append([
-            {
-                "q_id": i,
-                "id": results_and_scores[0][c],
-                "title": docs[c]["title"],
-                "text": docs[c]["text"],
-                "score": scores[c],
-            }
-            for c in range(ctxs_num)
-        ])
-    return merged_data
+    parser = argparse.ArgumentParser(
+        description='Retrieval for open-ended query.')
+    parser.add_argument('--num_retrieval',
+                        type=int,
+                        default=20)
+    parser.add_argument('--data_name',
+                        type=str,
+                        default='oe_base_train')
+    parser.add_argument('--qa_data',
+                        type=str,
+                        default='./data/dev/oe_base_train.csv')
+    parser.add_argument('--documents_pool',
+                        type=str,
+                        default='./data/retrieval_database/psgs_w100.tsv')
+    parser.add_argument('--retrieval_method',
+                        type=str,
+                        default='bm25',
+                        choices=['bm25', 'cde', 'contriever'])
+    parser.add_argument('--elastic_search_server',
+                        type=str,
+                        default='http://localhost:9200')
+    parser.add_argument('--batch_size',
+                        type=int,
+                        default=128)
+    parser.add_argument('--output_folder',
+                        type=str,
+                        default='./data/dev')
+    parser.add_argument('--seed',
+                        type=int,
+                        default=0)
+    return parser.parse_args()
 
 
-def load_data(data_path):
-    if data_path.endswith(".json"):
-        with open(data_path, "r") as fin:
-            data = json.load(fin)
-    elif data_path.endswith(".jsonl"):
-        data = []
-        with open(data_path, "r") as fin:
-            for k, example in enumerate(fin):
-                example = json.loads(example)
-                data.append(example)
-    return data
-
-
-def main(model_name_or_path="facebook/contriever-msmarco",
-         no_fp16=False,
-         projection_size=768,
-         n_subquantizers=0,
-         n_bits=8,
-         passages_embeddings="wikipedia_embeddings/*",
-         passages_path="psgs_w100.tsv",
-         indexing_batch_size=1000000,
-         n_docs=20,
-         dataset="dev",
-         lowercase=True,
-         normalize_text=True,
-         question_maxlength=512,
-         per_gpu_batch_size=128,
-         ):
+def main(args):
     
-    # load the quries
-    if os.path.exists(f'./data/{dataset}'):
-        data_path = os.listdir(f'./data/{dataset}')
-        new_data_path = []
-        for p in data_path:
-            if 'oe' in p:
-                new_data_path.append(p)
-        print(new_data_path)
-        all_data = [pd.read_csv(os.path.join(f"./data/{dataset}", p)) for p in new_data_path] 
+    set_seed(args.seed)
+    # Load QA data.
+    print("=====> Loading QA Dataset")
+
+    dataset = pd.read_csv(args.qa_data)
+    questions = dataset['x']
+    oe_questions = dataset['q']
+    answers = dataset['y']
+    
+    retrieval_queries = {}
+    for i in range(len(oe_questions)):
+        question = oe_questions[i]
+        qa_id = str(args.data_name) + "_" + str(i)
+        retrieval_queries[qa_id] = question
+        
+    # Load pool of documents.
+    print("=====> Loading Pool of Documents")
+    
+    raw_passages = load_passages(args.documents_pool)
+    #raw_passages = torch.load(args.documents_pool)
+    titles = [item['title'] for item in raw_passages]
+    texts = [item['text'] for item in raw_passages]
+    
+    retrieval_corpus = {}
+    for i in range(len(titles)):
+        json_obj = {}
+        json_obj["title"] = titles[i]
+        json_obj["text"] = texts[i]
+        retrieval_corpus[str(i)] = json_obj
+
+    # Conducting retrieval.
+    print("=====> Starting Retrieval")
+    
+    if args.retrieval_method == 'bm25':
+        model = BM25(hostname=args.elastic_search_server,
+                     index_name=args.data_name + "_bm25", initialize=True)
+        retriever = EvaluateRetrieval(model)
+        
+    elif args.retrieval_method == 'contriever':
+        model, tokenizer, _ = load_retriever('facebook/contriever-msmarco')
+        model = model.cuda()
+        model.eval()
+        query_encoder = model
+        doc_encoder = model
+
+        model = DRES(DenseEncoderModel(query_encoder=query_encoder,
+                                       doc_encoder=doc_encoder,
+                                       tokenizer=tokenizer),
+                     batch_size=args.batch_size)
+        retriever = EvaluateRetrieval(model, score_function="dot")
+        
+    elif args.retrieval_method == 'cde':
+        print("=====> Generating Dataset Embeddings")
+        
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        model = AutoModel.from_pretrained("jxm/cde-small-v1", 
+                                          trust_remote_code=True).cuda()
+        
+        ## For generating dataset embeddings, 
+        ## we need to sample a subset of the corpus.
+        if len(retrieval_corpus) >= 512:
+            selected_keys = random.sample(list(retrieval_corpus.keys()), k=512)
+            minicorpus_docs = {key: retrieval_corpus[key] 
+                               for key in selected_keys}
+        else:
+            minicorpus_docs = retrieval_corpus 
+        
+        dataset_embeddings = generate_dataset_embeddings(minicorpus_docs, 
+                                                         model, 
+                                                         tokenizer,
+                                                         args.batch_size)
+        
+        print("=====> Retrieving with CDE")
+        model.eval()
+        query_encoder = model 
+        doc_encoder = model
+        
+        model = DRES(CDEModel(query_encoder=query_encoder,
+                              doc_encoder=doc_encoder,
+                              tokenizer=tokenizer,
+                              dataset_embeddings=dataset_embeddings),
+                     batch_size=args.batch_size)
+        retriever = EvaluateRetrieval(model, score_function="dot")
+        
     else:
-        raise FileNotFoundError(f"No files found in the folder: ./data/{dataset}")
+        raise ValueError("Wrong retrieval method is inserted.")
     
-    # load the retrieval model
-    print(f"Loading model from: {model_name_or_path}")
-    model, tokenizer, _ = load_retriever(model_name_or_path)
-    model.eval()
-    model = model.cuda()
-    if not no_fp16:
-        model = model.half()
-
-    index = Indexer(projection_size, n_subquantizers, n_bits)
-
-    # index all passages
-    input_paths = glob.glob(passages_embeddings)
-    input_paths = sorted(input_paths)
-    embeddings_dir = os.path.dirname(input_paths[0])
-    index_path = os.path.join(embeddings_dir, "index.faiss")
-    
-    if os.path.exists(index_path):
-        index.deserialize_from(embeddings_dir)
-    else:
-        print(f"Indexing passages from files {input_paths}")
-        start_time_indexing = time.time()
-
-        index_encoded_data(index, input_paths, indexing_batch_size)
-        print(f"Indexing time: {time.time()-start_time_indexing:.1f} s.")
-        index.serialize(embeddings_dir)
-
-    # load passages
-    passages = load_passages(passages_path)
-    passage_id_map = {x["id"]: x for x in passages}
-    
-    # embed queries
-    for idx, data in enumerate(all_data):
-        queries = list(data['q'])
-
-        print(f"Search {len(queries)} queries...")
-        questions_embedding = embed_queries(per_gpu_batch_size,
-                                            lowercase,
-                                            normalize_text,
-                                            question_maxlength,
-                                            queries,
-                                            model,
-                                            tokenizer)
-        # get top k results
-        start_time_retrieval = time.time()
-        top_ids_and_scores = index.search_knn(questions_embedding, n_docs)
-        print(f"Search time: {time.time()-start_time_retrieval:.1f} s.")
+    #if args.retrieval_method != 'cde':
+    #try:
+    retrieval_scores = retriever.retrieve(retrieval_corpus,
+                                          retrieval_queries)
+    print("retrieval done") 
+    #except Exception as e:
+    #    print("retrieval exception: " + str(e))
         
-        merged_data = add_passages(queries, passage_id_map, top_ids_and_scores) 
+    # Construct dataset using retrieved scores.
+    print("=====> Starting Construction of Dataset")
+    sorted_idxs = []
+    sorted_scores = []
+
+    retrieval_scores_idxs = list([int(n.split("_")[-1])
+                                  for n in retrieval_scores.keys()])
+    
+    for i in retrieval_scores_idxs:
+        scores_i = np.array(list(
+            retrieval_scores['{}_{}'.format(args.data_name, i)].values()))
+        sorted_idx = np.argsort(scores_i)[::-1]
+        keys = list(retrieval_scores['{}_{}'.format(args.data_name, i)].keys())
+
+        sorted_idxs_i = []
+        sorted_scores_i = []
+        for j in range(min(len(scores_i), args.num_retrieval)):
+            sorted_idxs_i.append(int(keys[sorted_idx[j]]))
+            sorted_scores_i.append(scores_i[sorted_idx[j]])
+
+        sorted_idxs.append(sorted_idxs_i)
+        sorted_scores.append(sorted_scores_i)
         
-        output_path = os.path.join(f"./data/{dataset}/rag_data", f"{new_data_path[idx].split('/')[-1]}.json")
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(merged_data, f, ensure_ascii=False, indent=4)
-        print(f"Saved results to {output_path}")
+    res = []
+    for idx, i in enumerate(retrieval_scores_idxs):
+        new_item = {}
+        new_item['q'] = oe_questions[i]
+        new_item['y'] = answers[i]
+        new_item['x'] = questions[i]
 
+        ctxs = []
+        for j in range(len(sorted_idxs[idx])):
+            ctx = {}
+            ctx['id'] = sorted_idxs[idx][j]
+            ctx['title'] = titles[sorted_idxs[idx][j]]
+            ctx['text'] = texts[sorted_idxs[idx][j]]
+            ctx['score'] = sorted_scores[idx][j]
+            ctxs.append(ctx)
+        new_item['contexts'] = ctxs
+        res.append(new_item)
 
-if __name__ == "__main__":
-    import fire 
-    fire.Fire(main)
+    if not os.path.exists(args.output_folder):
+        os.makedirs(args.output_folder)
+    
+    print("=====> All Procedure is finished!")
+    with open(f'./{args.output_folder}/{args.data_name}_{args.retrieval_method}.json',
+              "w", encoding='utf-8') as writer:
+        writer.write(json.dumps(res, indent=4, ensure_ascii=False) + "\n")
+    
+    
+if __name__ == '__main__':
+    args = parse_args()
+    main(args)

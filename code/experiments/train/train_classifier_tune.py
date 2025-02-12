@@ -1,52 +1,37 @@
 import os
-import wandb
-from dataclasses import dataclass, field
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import pandas as pd 
 from tqdm.auto import tqdm
+from datasets import Dataset
+from dataclasses import dataclass, field
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import default_collate
-from peft import PeftModel
+
 from transformers.trainer import (
     TRAINING_ARGS_NAME,
     logger,
     Trainer,
-    TrainingArguments,
-    TrainerCallback
+    TrainingArguments
 )
-from torch.distributions import Categorical, kl_divergence
 from transformers.modeling_utils import unwrap_model
-import torch
-from datasets import Dataset
-from src import (AcceleratorState,
-                 create_model, 
-                 create_tokenizer,
-                 get_lora_model,
-                 get_classifier_head,
-                 LabeledStringDataCollator,
-                 CT_PROMPT,
-                 LING_PROMPT,
-                 NUMBER_PROMPT,
-                 entrypoint,
-                 get_token_vec)
 
-from datasets import load_dataset
-
-import pandas as pd 
-import warnings 
-warnings.filterwarnings("ignore", category=UserWarning, module="bitsandbytes.autograd._functions")
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
-class WandbConfigUpdateCallback(TrainerCallback):
-    def __init__(self, **config):
-        self._config = config
-
-    def on_train_begin(self, _args, state, _control, **_):
-        if state.is_world_process_zero:
-            wandb.config.update(self._config, allow_val_change=True)
-
-            del self._config
+from src.logging import (
+    entrypoint,
+    WandbConfigUpdateCallback
+)
+from src.distributed import AcceleratorState
+from src.llm_model_utils import (
+    create_model,
+    create_tokenizer
+)
+from src.peft_utils import (
+    get_lora_model,
+    get_classifier_head
+)
+from src.generate_utils import LabeledStringDataCollator
             
             
 class ClassificationTuner(Trainer):
@@ -82,7 +67,6 @@ class ClassificationTuner(Trainer):
         args.label_names = train_dataset.column_names
 
         self._collate_fn = LabeledStringDataCollator(tokenizer)
-
         self.classifier_model = classifier_model
 
         super().__init__(
@@ -99,24 +83,26 @@ class ClassificationTuner(Trainer):
 
         return super()._wrap_model(*args, **kwargs)
 
-    def prepare_inputs(self, model, inputs):
-        prompts = inputs['prompt']
+    def prepare_inputs(self, inputs):
+        
+        prompts = inputs['y_prompt']
         targets = inputs['y']
         predictions = inputs['y_pred']
-        q_labels = torch.tensor(inputs['c']).long()
+        
+        q_labels = torch.tensor(inputs['correct']).long()
         q_labels = q_labels.to(self.accelerator.device)
 
         return prompts, targets, predictions, q_labels
 
     def prepare_class_inputs(
-        self, model, inputs, targets, predictions, class_labels, eval_mode=False
+        self, model, inputs, predictions, eval_mode=False
     ):
         
         class_inputs = {
             k: v.to(self.accelerator.device)
             for k, v in self._collate_fn(inputs, predictions).items()
         }
-        #import ipdb; ipdb.set_trace()
+        
         inference_mode = (not self.args.with_lora) or eval_mode
 
         with torch.inference_mode(inference_mode):
@@ -129,10 +115,10 @@ class ClassificationTuner(Trainer):
         return class_inputs
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        inputs, targets, predictions, class_labels = self.prepare_inputs(model, inputs)
+        inputs, _, predictions, class_labels = self.prepare_inputs(inputs)
 
         class_inputs = self.prepare_class_inputs(
-            model, inputs, targets, predictions, class_labels
+            model, inputs, predictions
         )
 
         class_logits = self.classifier_model(class_inputs)
@@ -157,12 +143,10 @@ class ClassificationTuner(Trainer):
         all_labels, all_logits = [], []
 
         for inputs in tqdm(eval_dataloader, leave=False):
-            inputs, targets, predictions, class_labels = self.prepare_inputs(
-                self.model, inputs
-            )
+            inputs, _, predictions, class_labels = self.prepare_inputs(inputs)
 
             class_inputs = self.prepare_class_inputs(
-                self.model, inputs, targets, predictions, class_labels, eval_mode=True
+                self.model, inputs, predictions, eval_mode=True
             )
 
             class_logits = self.classifier_model(class_inputs)
@@ -224,11 +208,10 @@ def main(
     seed=137,
     log_dir=None,
     dataset=None,
-    data_dir=None,
+    data_dir="data/processed",
     prompt_style=None,
     max_token_length=None,
     num_workers=4,
-    use_dataset_cache=True,
     model_name=None,
     int8=True,
     lora_rank=8,
@@ -261,8 +244,12 @@ def main(
     )
 
     with accelerator.main_process_first():
-        train_data = pd.read_csv("./final_data/dev/ct_train.csv")
-        valid_data = pd.read_csv("./final_data/dev/ct_valid.csv")
+        
+        data_dir = os.path.join(data_dir, 'ct')
+        
+        train_data = pd.read_csv(os.path.join(f"{data_dir}", "train.csv"))
+        train_data = train_data.sample(frac=1, random_state=seed).reset_index(drop=True)
+        valid_data = pd.read_csv(os.path.join(f"{data_dir}", "valid.csv"))
 
         train_data = Dataset.from_pandas(train_data)
         valid_data = Dataset.from_pandas(valid_data)

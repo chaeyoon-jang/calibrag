@@ -24,45 +24,44 @@ pip install -r requirements.txt
 
 ### **1. Create Open-ended Questions**
 ```bash
-python -m experiments.api --data_dir ./data/dev --type oe
+python -m experiments.api --data_dir ./data/dev/raw --type oe
 ```
 
 ### **2. Generate RAG Data**
 
-1. **Download Preprocessed Passage Data (DPR Format)**   
+1. **Download Preprocessed Passage Data**   
    ```bash
    wget https://dl.fbaipublicfiles.com/dpr/wikipedia_split/psgs_w100.tsv.gz
    ```
 
-2. **Download Generated Embeddings (Contriever)** 
-   ```bash
-   wget https://dl.fbaipublicfiles.com/contriever/embeddings/contriever-msmarco/wikipedia_embeddings.tar
-   ```
-
-3. **Run Retrieval on the Dev Dataset**  
+2. **Run Retrieval**  
     ```bash
-    python -m experiments.retrieve --dataset dev
+    sh scripts/retrieve_dev.sh
     ```
 
-### **3. Generate LLM Outputs with Uncertainty**
+### **3. Generate LLM Outputs**
+For baselines,
 ```bash
-python -m experiments.make_lm_outputs \
-  --model_name="Meta-Llama-3.1-8B-Instruct" \
-  --batch_size=32 \
-  --uc_type="calibrag" or "ct" or "ling" or "number" \
-  --max_new_tokens=40 \
-  --dataset="dev" \
-  --inference False
+sh scripts/base_calibrag_lm_outputs.sh
+```
+For CalibRAG,
+```bash
+sh scripts/calibrag_lm_outputs.sh
 ```
 
 ### **4. Simulate Human Decision-Making**
 ```bash
-python -m experiments.make_decision --data_dir <data must have columns x, z_pred>
+sh scripts/calibrag_decision.sh
 ```
 
 ### **5. Evaluate Results**
+For baselines,
 ```bash
-python -m experiments.api --data_dir <data must have columns x, y, y_pred> --multiple False --type eval
+sh scripts/base_train_api.sh
+```
+For CalibRAG,
+```bash
+sh scripts/calibrag_api.sh
 ```
 
 <p>
@@ -112,7 +111,7 @@ python -m experiments.train.train_calibration_tune \
 
 ### **5. CalibRAG Training**
 ```bash
-python -m experiments.train.train_reranking_model \
+python -m experiments.train.train_calibrag \
   --model_name="Meta-Llama-3.1-8B-Instruct" \
   --batch_size 2 \
   --gradient_accumulation_steps 2 \
@@ -125,43 +124,42 @@ python -m experiments.train.train_reranking_model \
 
 ### **1. Create Open-ended Questions**
 ```bash
-python -m experiments.api --data_dir ./data/test --type oe
+    python -m experiments.api --data_dir ./data/test/raw --type oe
 ```
 
 ### **2. Generate RAG Data**
 ```bash
-   python -m experiments.retrieve --dataset test
+   sh scripts/retrieve_test.sh
 ```
 
 ### **3. Produce LLM Outputs with Uncertainty**
+For baselines,
 ```bash
-python -m experiments.make_lm_outputs \
-  --model_name="Meta-Llama-3.1-8B-Instruct" \
-  --batch_size=32 \
-  --uc_type=<method type: calibrag, ct, ling, number> \
-  --max_new_tokens=40 \
-  --dataset="test" \
-  --query_peft_dir=<your trained model dir> \
-  --inference True \
-  --with_classifier <True if ct-probe and calibrag>
+sh scripts/base_eval_lm_outputs.sh
 ```
-*Optional*: If you wish to regenerate queries, use `regenerate.py`.
+For CalibRAG,
+```bash
+sh scripts/calibrag_eval_lm_outputs.sh
+```
 
 ### **4. Simulate Human Decision-Making for Testing**
+For baselines,
 ```bash
-python -m experiments.make_decision \
-  --data_dir <data must have columns x, z_pred> \
-  --inference True \
-  --uc_type <method type: ct (ct-probe, ct-lora, calibrag), ling, number>
+sh scripts/base_eval_decision.sh
+```
+For CalibRAG,
+```bash
+sh scripts/calibrag_decision.sh
 ```
 
 ### **5. Evaluate Results**
+For baselines,
 ```bash
-python -m experiments.api \
-  --data_dir <data must have columns x, y, y_pred> \
-  --multiple False \
-  --type eval \
-  --uc_type <method type: ct (ct-probe, ct-lora, calibrag), ling, number>
+sh scripts/base_eval_api.sh
+```
+For CalibRAG,
+```bash
+sh scripts/calibrag_api.sh
 ```
 
 ---

@@ -1,69 +1,45 @@
+################################################################################
+## This implementation based on the code from https://arxiv.org/abs/2406.08391. 
+# 1. c_type = "ct" for calibration tuning.
+# 2. c_type = "ling" for linguistic confidence tuning.
+# 3. c_type = "number" for number confidence tuning.
+################################################################################
 import os
-import wandb
-from dataclasses import dataclass, field
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import pandas as pd 
 from tqdm.auto import tqdm
+from datasets import Dataset
+from dataclasses import dataclass, field
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import default_collate
-from peft import PeftModel
+from torch.distributions import Categorical, kl_divergence
+
 from transformers.trainer import (
     TRAINING_ARGS_NAME,
     logger,
     Trainer,
-    TrainingArguments,
-    TrainerCallback
+    TrainingArguments
 )
-from torch.distributions import Categorical, kl_divergence
-from transformers.modeling_utils import unwrap_model
-import torch
-from datasets import Dataset
-from src import (AcceleratorState,
-                 create_model, 
-                 create_tokenizer,
-                 get_lora_model,
-                 get_classifier_head,
-                 LabeledStringDataCollator,
-                 CT_PROMPT,
-                 LING_PROMPT,
-                 NUMBER_PROMPT,
-                 entrypoint,
-                 get_token_vec)
 
-from datasets import load_dataset
-
-import pandas as pd 
-import warnings 
-warnings.filterwarnings("ignore", category=UserWarning, module="bitsandbytes.autograd._functions")
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
-class WandbConfigUpdateCallback(TrainerCallback):
-    def __init__(self, **config):
-        self._config = config
-
-    def on_train_begin(self, _args, state, _control, **_):
-        if state.is_world_process_zero:
-            wandb.config.update(self._config, allow_val_change=True)
-
-            del self._config
-
-
-def resize_uc_token_embeddings(tokenizer, model, uc_tokens):
-    extra_token_count = len(tokenizer) - model.get_input_embeddings().weight.data.size(0)
-
-    if extra_token_count:
-        model.resize_token_embeddings(len(tokenizer))
-
-        input_embeddings = model.get_input_embeddings().weight.data
-        output_embeddings = model.get_output_embeddings().weight.data
-
-        for i, uc_token in enumerate(uc_tokens):
-            uc_token_ids = tokenizer.convert_tokens_to_ids(uc_token)
-            uc_token_embeddings = input_embeddings[uc_token_ids]
-            uc_mean_embedding = uc_token_embeddings.mean(dim=0, keepdim=True)
-            input_embeddings[-extra_token_count+i] = uc_mean_embedding
-            output_embeddings[-extra_token_count+i] = uc_mean_embedding
+from src.logging import (
+    entrypoint,
+    WandbConfigUpdateCallback
+)
+from src.distributed import AcceleratorState
+from src.llm_model_utils import (
+    create_model,
+    create_tokenizer,
+    resize_c_token_embeddings
+    )
+from src.peft_utils import get_lora_model
+from src.generate_utils import (
+    LabeledStringDataCollator,
+    get_token_vec
+    )
+from src.prompt_hub import c_prompts 
             
 
 class CalibrationTuner(Trainer):
@@ -73,7 +49,7 @@ class CalibrationTuner(Trainer):
         bf16: bool = field(default=torch.cuda.is_bf16_supported())
         ddp_find_unused_parameters: bool = field(default=False)
         log_on_each_node: bool = field(default=False)
-        evaluation_strategy: str = field(default="steps")
+        eval_strategy: str = field(default="steps")
         dataloader_num_workers: int = field(default=4)
         optim: str = field(default="adamw_torch")
         lr: float = field(default=1e-4)
@@ -82,8 +58,7 @@ class CalibrationTuner(Trainer):
         warmup_ratio: float = field(default=0.0)
         gradient_accumulation_steps: int = field(default=1)
         report_to: str = field(default="wandb")
-        ## Custom Args.
-        query_format: str = field(default="roman_choice")
+        ## Custom args.
         ref_adapter_name: str = field(default="_ref")
         kl_type: str = field(default="jsd")
         kl_decay: float = field(default=0.0)
@@ -93,20 +68,15 @@ class CalibrationTuner(Trainer):
         args=None,
         train_dataset=None,
         tokenizer=None,
-        uc_type=None,
+        c_type=None,
         **kwargs,
     ):
         args.label_names = train_dataset.column_names
 
         self._collate_fn = LabeledStringDataCollator(tokenizer)
-        self.uc_type = uc_type
-        if self.uc_type == "ling":
-            self.uc_prompt = LING_PROMPT
-        elif self.uc_type == "ct":
-            self.uc_prompt = CT_PROMPT
-        elif self.uc_type == "number":
-            self.uc_prompt = NUMBER_PROMPT
-
+        self.c_type = c_type
+        self.c_prompt = c_prompts[c_type]
+        
         super().__init__(
             **kwargs,
             args=args,
@@ -120,22 +90,20 @@ class CalibrationTuner(Trainer):
 
     def compute_query_loss(self, model, inputs, q_labels, predictions):
         
-        q_token_vec = get_token_vec(self.tokenizer, self.uc_type)
-        predictions = [p + self.uc_prompt for p in predictions]
+        q_token_vec = get_token_vec(self.tokenizer, self.c_type)
+        predictions = [p + self.c_prompt for p in predictions]
         
         q_loss_inputs = {
             k: v.to(self.accelerator.device)
-            for k, v in self._collate_fn(inputs, predictions).items() # add uc prompt
+            for k, v in self._collate_fn(inputs, predictions).items()
         }
         
         q_outputs = model(**q_loss_inputs)
         q_logits = q_outputs.logits[..., -1, q_token_vec]
-
         q_loss = F.cross_entropy(
             q_logits,
             q_labels.to(q_logits.device)
         )
-
         return q_loss
 
     def compute_kl_loss(self, model, inputs, targets):
@@ -149,7 +117,6 @@ class CalibrationTuner(Trainer):
 
         probs = model(**ref_inputs).logits[..., :-1, :].softmax(dim=-1)
         with torch.inference_mode():
-            ## NOTE: self.model is always unwrapped.
             self.model.set_adapter(self.args.ref_adapter_name)
 
             ref_probs = self.model(**ref_inputs).logits[..., :-1, :].softmax(dim=-1)
@@ -179,18 +146,14 @@ class CalibrationTuner(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, return_metrics=False):
         
-        prompts = inputs['prompt']
+        prompts = inputs['y_prompt']
         targets = inputs['y']
-        
-        if self.uc_type == "ct":
-            predictions = inputs['y_pred']
-        else:
-            predictions = [eval(inp)[0] for inp in inputs['y_pred']]
+        predictions = inputs['y_pred']
         
         q_loss = self.compute_query_loss(
             model,
             prompts,
-            inputs['c'],
+            inputs['correct'],
             predictions,
         )
         kl_loss = self.compute_kl_loss(model, prompts, targets)
@@ -224,7 +187,6 @@ class CalibrationTuner(Trainer):
                     self.model_wrapped, inputs, return_metrics=True
                 )
 
-            ## De-mean for distributed computation. Size for correct gather.
             loss_metrics = {
                 k: torch.zeros(B)
                 .index_fill_(0, torch.tensor([0]).long(), v * B)
@@ -260,7 +222,6 @@ class CalibrationTuner(Trainer):
         return all_metrics
 
     def _save(self, output_dir=None, state_dict=None):
-        ## NOTE: Fix for name hierarchy due to multiple adapters.
         if state_dict is None:
             state_dict = self.model.state_dict()
             state_dict.update(
@@ -290,11 +251,10 @@ def main(
     seed=137,
     log_dir=None,
     dataset=None,
-    data_dir=None,
+    data_dir="data/processed",
     prompt_style=None,
     max_token_length=None,
     num_workers=4,
-    use_dataset_cache=True,
     model_name=None,
     int8=True,
     lora_rank=8,
@@ -308,7 +268,7 @@ def main(
     kl_decay=1.0,
     max_steps=5000,
     gradient_accumulation_steps=1,
-    uc_type="ct"
+    c_type="ct"
 ):
     accelerator = AcceleratorState()
 
@@ -328,12 +288,12 @@ def main(
         gradient_accumulation_steps=gradient_accumulation_steps
     )
     with accelerator.main_process_first():
-        if uc_type == "ct":
-            train_data = pd.read_csv("/data_final/dev/ct_train.csv")
-            valid_data = pd.read_csv("/data_final/dev/ct_valid.csv")
-        else:
-            train_data = pd.read_csv("/data_final/dev/ct_sampling_train.csv")
-            valid_data = pd.read_csv("/data_final/dev/ct_sampling_valid.csv")
+        data_dir = os.path.join(data_dir, "sampling") if c_type != "ct"\
+            else os.path.join(data_dir, "ct")  
+        
+        train_data = pd.read_csv(os.path.join(f"{data_dir}", "train.csv"))
+        train_data = train_data.sample(frac=1, random_state=seed).reset_index(drop=True)
+        valid_data = pd.read_csv(os.path.join(f"{data_dir}", "valid.csv"))
         
         train_data = Dataset.from_pandas(train_data)
         valid_data = Dataset.from_pandas(valid_data)
@@ -347,19 +307,19 @@ def main(
         device_map={"": accelerator.local_process_index}
         )
     
-    if uc_type == "ling":
+    if c_type == "ling":
         new_words = ["Unlikely", "Doubtful", "Uncertain", "Ambiguous", 
                     "Probable", "Likely", "Possible", 
                     "Specified","Confirmed", "Certain", "Inevitable"]
         
-        uc_tokens = []
+        c_tokens = []
         for word in new_words:
             tokens = tokenizer.tokenize(word, add_special_tokens=False)
             if len(tokens) > 1:
-                uc_tokens.append(tokens)
+                c_tokens.append(tokens)
             
         tokenizer.add_tokens(new_words)
-        resize_uc_token_embeddings(tokenizer, model, uc_tokens)
+        resize_c_token_embeddings(tokenizer, model, c_tokens)
     
     
     model = get_lora_model(
@@ -383,9 +343,12 @@ def main(
     )
     
     model.set_adapter("default")
+    
+    print(f"Training model with calibration tuning ({c_type}).")
+    
     trainer = CalibrationTuner(
         model=model,
-        uc_type=uc_type,
+        c_type=c_type,
         args=trainer_args,
         train_dataset=train_data,
         eval_dataset=valid_data,

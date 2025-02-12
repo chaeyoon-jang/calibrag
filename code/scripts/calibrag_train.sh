@@ -1,0 +1,2 @@
+python -m experiments.train.train_calibrag --with_lora True --batch_size 2 --gradient_accumulation_steps 2 --lr 1e-04 --data_dir "./data/dev/processed/calibrag/bm25" --seed 0 --max_steps 10000
+python -m experiments.train.train_calibrag --with_lora True --batch_size 2 --gradient_accumulation_steps 2 --lr 1e-04 --data_dir "./data/dev/processed/calibrag/contriever" --seed 0 --max_steps 10000

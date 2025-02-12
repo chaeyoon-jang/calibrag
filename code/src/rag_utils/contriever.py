@@ -3,9 +3,9 @@
 import os
 import torch
 import transformers
-from transformers import BertModel, XLMRobertaModel
+from transformers import BertModel, XLMRobertaModel, AutoModel, AutoConfig
 
-from .utils import *
+from .utils import load_hf
 
 
 class Contriever(BertModel):
@@ -98,9 +98,9 @@ class XLMRetriever(XLMRobertaModel):
         if normalize:
             emb = torch.nn.functional.normalize(emb, dim=-1)
         return emb
+    
 
-
-def load_retriever(model_path, pooling="average", random_init=False):
+def load_retriever(model_path, pooling="average", random_init=False, trust_remote_code=False):
     # try: check if model exists locally
     path = os.path.join(model_path, "checkpoint.pth")
     if os.path.exists(path):

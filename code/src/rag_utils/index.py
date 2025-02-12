@@ -24,7 +24,6 @@ class Indexer(object):
 
     def index_data(self, ids, embeddings):
         self._update_id_mapping(ids)
-        embeddings = np.squeeze(np.array(embeddings), axis=1)
         embeddings = embeddings.astype('float32')
         if not self.index.is_trained:
             self.index.train(embeddings)

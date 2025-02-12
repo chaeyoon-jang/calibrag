@@ -1,74 +1,47 @@
+################################################################################
+## This file covers two main cases:
+# 1. Generating 'y_pred' from 'x' without using a retrieved document 'd' (Baselines).
+# 2. Generating 'z' from query q with a retrieved document 'd' (inference=True):
+#    - Training: Generate 'z' using all top-k retrieved documents 'd' for 'q'.
+#    - Inference: 
+#       1) Generate 'z' using the top-1 (reranked by f) document 'd' for 'q'.
+#       2) In baselines, Generate 'c' from 'z' and 'q'.
+# 3. Generated new query 'q' from a original 'q'.
+################################################################################
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import json
 import wandb
-import torch
-import logging
-import warnings 
 import pandas as pd
-from tqdm.auto import tqdm
 from datasets import Dataset
+from functools import partial 
 from transformers import GenerationConfig, set_seed
 
-from src import (
-    entrypoint,
-    generate_outputs, 
-    generate_uc_outputs,
-    generate_rag_outputs,
+from src.logging import entrypoint
+from src.generate_utils import (
+    generate_outputs,
+    generate_c_outputs,
+    generate_rag_outputs
+    )
+from src.llm_model_utils import (
     create_model,
     create_tokenizer,
+    resize_c_token_embeddings
+    )
+from src.peft_utils import (
     get_lora_model,
-    get_classifier_head,
-    get_loader,
-    CT_PROMPT,
-    LING_PROMPT,
-    NUMBER_PROMPT,
-    QZ_PRED_INSTRUCTION,
-    QZ_PRED_PROMPT,
-    X_PRED_Y_INSTRUCTION,
+    get_classifier_head
+    ) 
+from src.llm_data_utils import get_loader 
+from src.prompt_hub import (
+    c_prompts,
+    Z_PROMPT,
+    Z_PROMPT_MED,
     X_PRED_Y_PROMPT,
-    BASE_INSTRUCTION,
-    QUERY_REGENERATION_INSTRUCTION,
-    QUERY_REGENERATION_PROMPT
-)
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast from")
-
-uc_prompts = {
-    'ct': CT_PROMPT,
-    'ling': LING_PROMPT, 
-    'number': NUMBER_PROMPT
-}
-
-
-def read_json(file_path):
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            data = json.load(file)
-        return data
-    except FileNotFoundError:
-        print(f"Error: The file at {file_path} was not found.")
-    except json.JSONDecodeError:
-        print(f"Error: The file at {file_path} could not be decoded as valid JSON.")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-    
-
-def resize_uc_token_embeddings(tokenizer, model, uc_tokens):
-    extra_token_count = len(tokenizer) - model.get_input_embeddings().weight.data.size(0)
-
-    if extra_token_count:
-        model.resize_token_embeddings(len(tokenizer))
-
-        input_embeddings = model.get_input_embeddings().weight.data
-        output_embeddings = model.get_output_embeddings().weight.data
-
-        for i, uc_token in enumerate(uc_tokens):
-            uc_token_ids = tokenizer.convert_tokens_to_ids(uc_token)
-            uc_token_embeddings = input_embeddings[uc_token_ids]
-            uc_mean_embedding = uc_token_embeddings.mean(dim=0, keepdim=True)
-            input_embeddings[-extra_token_count+i] = uc_mean_embedding
-            output_embeddings[-extra_token_count+i] = uc_mean_embedding
+    QUERY_REGENERATION_PROMPT,
+    X_PRED_Y_PROMPT_MED
+    )
 
 
 def direct_case(
@@ -80,68 +53,106 @@ def direct_case(
     generation_config,
     inference=False,
     rag_dataset=None,
-    uc_type=None,
-    with_classifier=False):
+    c_type=None,
+    with_classifier=False,
+    medical=False):
     
     if inference:
+
+        dataset = pd.DataFrame()
+        dataset['q'] = [data['q'] for data in rag_dataset]
+        dataset['x'] = [data['x'] for data in rag_dataset]
+        dataset['y'] = [data['y'] for data in rag_dataset]
         
-        # generate model outputs
-        base_instruction = QZ_PRED_INSTRUCTION
-        base_prompt = QZ_PRED_PROMPT
+        base_prompt = Z_PROMPT_MED if medical else Z_PROMPT
         
-        if 'z' in dataset.columns:
-            dataset['output_prompt'] = [base_prompt.replace("<question>", q).replace("<title>", z_t).replace("context", z)\
-                for q, z, z_t in zip(list(dataset['q']), list(dataset['z']), list(dataset['z_t']))]
-                        
-        else: 
-            dataset['top1_z'] = [data[0]['text'] for data in rag_dataset]
-            dataset['top1_z_t'] = [data[0]['title'] for data in rag_dataset]
+        if 'd' in dataset.columns:
+            ## This case is for <ablation studies>
+            ## where we have to generate z given q with reranked d.
             
-            dataset['output_prompt'] = [base_prompt.replace("<question>", q).replace("<title>", z_t).replace("context", z)\
-                for q, z, z_t in zip(list(dataset['q']), list(dataset['top1_z']), list(dataset['top1_z_t']))]
+            dataset['z_prompt'] = [
+                base_prompt.replace("<question>", q)
+                .replace("<title>", z_t)
+                .replace("<context>", z)
+                for q, z, z_t in zip(dataset['q'], dataset['d'], dataset['d_t'])
+                ]
+
+        else: 
+            ## This case is for <main experiments-baselines>
+            ## where we have to generate z given q with original top-1 d.
+            
+            dataset['d'] = [data['contexts'][0]['text'] for data in rag_dataset]
+            dataset['d_t'] = [data['contexts'][0]['title'] for data in rag_dataset]
+            
+            dataset['z_prompt'] = [
+                base_prompt.replace("<question>", q)
+                .replace("<title>", z_t)
+                .replace("<context>", z)
+                for q, z, z_t in zip(dataset['q'], dataset['d'], dataset['d_t'])
+                ]
+        
+        print(f"=====> z prompt:\n{dataset['z_prompt'][0]}\n")
         
         dataset = dataset.dropna().reset_index(drop=True)
         loader = get_loader(Dataset.from_pandas(dataset), batch_size=batch_size,
                     pin_memory=True, accelerator=accelerator)
         
+        ## Generate z from q using retrieved document d.
         outputs = generate_outputs(
             accelerator,
             model,
             tokenizer,
             loader,
             generation_config,
-            base_instruction,
-            "output_prompt")
+            "z_prompt")
         
-        dataset['z_pred'] = outputs 
+        dataset['z'] = outputs 
         
-        if 'z' not in dataset.columns:
-            # generate model certainties
-            base_instruction = BASE_INSTRUCTION
-            uc_prompt = uc_prompts[uc_type]
-            
-            dataset['uc_prompt'] = [p+z_pred+uc_prompt for p, z_pred in zip(list(dataset['output_prompt']), list(dataset['z_pred']))]
-            
-            loader = get_loader(Dataset.from_pandas(dataset), batch_size=batch_size,
-                        pin_memory=True, accelerator=accelerator)
-            
-            uc_outputs = generate_uc_outputs(
-                accelerator,
-                model,
-                tokenizer,
-                loader,
-                base_instruction,
-                uc_type,
-                with_classifier)
-            dataset['uc'] = uc_outputs 
+        print(f"=====> z pred:\n{dataset['z'][0]}\n")
+        
+        ## Generate confidence-c from z and q.
+        ## ct: Is the proposed answer corect? (Yes/No)
+        ## number: provide the certainty level of answer (0-10)
+        ## ling: provide the certainty level of answer (Unlikely, ..., Inevitable)
+        
+        c_prompt = c_prompts[c_type]
+        
+        dataset['c_prompt'] = [p + z_pred + c_prompt for p, z_pred 
+                               in zip(list(dataset['z_prompt']),
+                                      list(dataset['z']))]
+        
+        print(f"=====> c prompt:\n{dataset['c_prompt'][0]}\n")
+        
+        loader = get_loader(Dataset.from_pandas(dataset), batch_size=4, #batch_size=batch_size,
+                    pin_memory=True, accelerator=accelerator)
+        
+        c_outputs = generate_c_outputs(
+            accelerator,
+            model,
+            tokenizer,
+            loader,
+            c_type,
+            with_classifier,
+            "c_prompt")
+        
+        print(f"=====> c pred: {c_outputs[0]}\n")
+        
+        dataset['c'] = c_outputs 
         
     else:
-        # generate model outputs
-        base_instruction = X_PRED_Y_INSTRUCTION
-        base_prompt = X_PRED_Y_PROMPT 
+        ## This case for training where we have to generate y from x. 
+        ## For ling, numer -> we have to sample 10 times.
         
-        dataset['output_prompt'] = [base_prompt.replace("<question>", q) for q in list(dataset['x'])]
-        #dataset['output_prompt'] = [base_prompt.replace("<question>", q) for q in list(dataset['x'])]
+        base_prompt = X_PRED_Y_PROMPT_MED if medical else X_PRED_Y_PROMPT
+
+        if medical:
+            dataset['y_prompt'] = [base_prompt.replace("<question>", q).replace("<option>", o) 
+                                   for q, o in zip(dataset['x'], dataset['option'])]
+        else:
+            dataset['y_prompt'] = [base_prompt.replace("<question>", q) 
+                                for q in list(dataset['x'])]
+            
+        print(f"=====> y prompt:\n{dataset['y_prompt'][0]}\n")
         
         loader = get_loader(Dataset.from_pandas(dataset), batch_size=batch_size,
                     pin_memory=True, accelerator=accelerator)
@@ -152,9 +163,10 @@ def direct_case(
             tokenizer,
             loader,
             generation_config,
-            base_instruction,
-            "output_prompt")
+            "y_prompt")
         
+        print(f"=====> y pred:\n{outputs[0]}\n")
+
         dataset['y_pred'] = outputs 
         
     return dataset  
@@ -164,26 +176,31 @@ def calibrag_case(
     accelerator,
     model,
     tokenizer,
-    dataset,
     batch_size,
     generation_config,
     inference=False,
+    dataset=None,
     rag_dataset=None,
     threshold=1.0,
-    top_k=20):
+    top_k=20,
+    medical=False):
     
     total_data = len(dataset)
-    base_instruction = QZ_PRED_INSTRUCTION
-    base_prompt = QZ_PRED_PROMPT
+    base_prompt = Z_PROMPT_MED if medical else Z_PROMPT
     
-    print(top_k)
+    # It is possible that len(rag_dataset) < len(dataset)
+    dataset = pd.DataFrame()
+    dataset['q'] = [data['q'] for data in rag_dataset]
+    dataset['x'] = [data['x'] for data in rag_dataset]
+    dataset['y'] = [data['y'] for data in rag_dataset]
     
     if inference:
-        # generate model outputs
+        ## Generate z for each Top-k documents.
+        ## Rerank the documents based on the confidence score.
+        ## If the confidence score is greater than the threshold, then stop.
+        
         final_results = []
-
         attempts = {}  
-
         dataset['id'] = range(len(dataset))  
 
         def process_dataset(
@@ -192,7 +209,6 @@ def calibrag_case(
             accelerator,
             model,
             tokenizer,
-            base_instruction,
             base_prompt,
             batch_size,
             current_idx,
@@ -200,20 +216,22 @@ def calibrag_case(
 
             if current_idx >= top_k:
                 for data_id in attempts:
-                    best_attempt = max(attempts[data_id], key=lambda x: x['uc'])
+                    best_attempt = max(attempts[data_id], key=lambda x: x['c'])
                     final_results.append(best_attempt)
                 return
 
             else:
-                print(f"current_idx is {current_idx}")
-                print(f'remain data is {len(dataset)}/{total_data}')
+                print(f"=====> Current index is {current_idx}")
+                print(f'=====> The remaining data is {len(dataset)}/{total_data}')
 
-            zs = [data[current_idx]['text'] for data in rag_dataset]
-            z_ts = [data[current_idx]['title'] for data in rag_dataset]
+            ds = [data['contexts'][current_idx]['text'] for data in rag_dataset]
+            d_ts = [data['contexts'][current_idx]['title'] for data in rag_dataset]
             
-            dataset['output_prompt'] = [
-                base_prompt.replace("<question>", q).replace("<title>", z_t).replace("context", z)
-                for q, z, z_t in zip(list(dataset['q']), zs, z_ts)
+            dataset['z_prompt'] = [
+                base_prompt.replace("<question>", q)
+                .replace("<title>", z_t)
+                .replace("<context>", z)
+                for q, z, z_t in zip(dataset['q'], ds, d_ts)
             ]
             
             loader = get_loader(
@@ -223,12 +241,11 @@ def calibrag_case(
                 accelerator=accelerator
             )
 
-            uc_outputs = generate_rag_outputs(
+            c_outputs = generate_rag_outputs(
                 accelerator,
                 model,
                 tokenizer,
                 loader,
-                base_instruction
             )
 
             new_rag_dataset = []
@@ -238,21 +255,21 @@ def calibrag_case(
             new_id = []
 
             for i in range(len(dataset)):
-                uc_output = uc_outputs[i]
+                c_output = c_outputs[i]
                 data_id = dataset['id'].iloc[i]
                 attempt = {
                     'x': dataset['x'].iloc[i],
                     'y': dataset['y'].iloc[i],
                     'q': dataset['q'].iloc[i],
-                    'output_prompt': dataset['output_prompt'].iloc[i],
-                    'uc': uc_output,
+                    'z_prompt': dataset['z_prompt'].iloc[i],
+                    'c': c_output,
                 }
 
                 if data_id not in attempts:
                     attempts[data_id] = []
                 attempts[data_id].append(attempt)
 
-                if uc_output >= threshold:
+                if c_output >= threshold:
                     continue  
                 else:
                     new_rag_dataset.append(rag_dataset[i])
@@ -274,7 +291,6 @@ def calibrag_case(
                     accelerator,
                     model,
                     tokenizer,
-                    base_instruction,
                     base_prompt,
                     batch_size,
                     current_idx + 1,
@@ -282,7 +298,7 @@ def calibrag_case(
                 )
             else:
                 for data_id in attempts:
-                    best_attempt = max(attempts[data_id], key=lambda x: x['uc'])
+                    best_attempt = max(attempts[data_id], key=lambda x: x['c'])
                     final_results.append(best_attempt)
 
         process_dataset(
@@ -291,7 +307,6 @@ def calibrag_case(
             accelerator,
             model,
             tokenizer,
-            base_instruction,
             base_prompt,
             batch_size,
             current_idx=0,
@@ -314,28 +329,40 @@ def calibrag_case(
             tokenizer,
             loader,
             generation_config,
-            base_instruction,
-            "output_prompt"
+            "z_prompt"
         )
 
-        dataset['z_pred'] = outputs
+        dataset['z'] = outputs
    
     else:
-        # generate all z_preds 
+        ## Generate all z for each Top-k documents.
+        
         all_result = []
-        for i in range(len(rag_dataset[0])):
+        for i in range(len(rag_dataset[0]['contexts'])):
             
             temp_dataset = dataset.copy()
             
-            temp_dataset['z'] = [data[i]['text'] for data in rag_dataset]
-            temp_dataset['z_t'] = [data[i]['title'] for data in rag_dataset]
+            temp_dataset['d'] = [data['contexts'][i]['text'] 
+                                 for data in rag_dataset]
+            temp_dataset['d_t'] = [data['contexts'][i]['title'] 
+                                   for data in rag_dataset]
             
-            temp_dataset['output_prompt'] = [base_prompt.replace("<question>", q).replace("<title>", z_t).replace("context", z)\
-                for q, z, z_t in zip(temp_dataset['q'], temp_dataset['z'], temp_dataset[f'z_t'])]
-    
-            loader = get_loader(Dataset.from_pandas(temp_dataset), batch_size=batch_size,
-                        pin_memory=True, accelerator=accelerator)
-            dataset = dataset.dropna().reset_index(drop=True)
+            temp_dataset['z_prompt'] = [
+                base_prompt.replace("<question>", q)
+                .replace("<title>", z_t)
+                .replace("<context>", z)
+                for q, z, z_t in zip(temp_dataset['q'], 
+                                     temp_dataset['d'], 
+                                     temp_dataset[f'd_t'])
+                ]
+            
+            print(f"=====> {i}th z prompt:\n{temp_dataset['z_prompt'][0]}\n")
+            
+            temp_dataset = temp_dataset.dropna().reset_index(drop=True)
+            loader = get_loader(Dataset.from_pandas(temp_dataset), 
+                                batch_size=batch_size,
+                                pin_memory=True,
+                                accelerator=accelerator)
             
             outputs = generate_outputs(
                 accelerator,
@@ -343,17 +370,18 @@ def calibrag_case(
                 tokenizer,
                 loader,
                 generation_config,
-                base_instruction,
-                "output_prompt")
+                "z_prompt")
             
-            temp_dataset['z_pred'] = outputs 
+            temp_dataset['z'] = outputs 
+            
+            print(f"=====> {i}th z pred:\n{temp_dataset['z'][0]}\n")
             
             all_result.append(temp_dataset)
         
         dataset = pd.concat(all_result)
         
     return dataset
-
+        
 
 def regenerate_query(
     accelerator,
@@ -363,7 +391,6 @@ def regenerate_query(
     batch_size,
     generation_config,
 ):
-    base_instruction = QUERY_REGENERATION_INSTRUCTION
     base_prompt = QUERY_REGENERATION_PROMPT
     
     dataset['query_prompt'] = [
@@ -384,10 +411,9 @@ def regenerate_query(
         tokenizer,
         loader,
         generation_config,
-        base_instruction,
         input_col_name="query_prompt")
     
-    dataset["q"] = outputs 
+    dataset["new_q"] = outputs 
     
     return dataset 
     
@@ -405,16 +431,17 @@ def main(
     with_classifier: bool = False,
     int8: bool = True,
     max_new_tokens: int = 50,
-    do_sample: bool = False,
     temperature: float = 1.0,
     top_p: float = 1.0,
     batch_size: int = 1,
     inference: bool = False,
-    uc_type="ling",  
+    retrieval_method: str = "bm25",
+    c_type= "calibrag",  
+    medical=False,
     top_k=20,
 ):
     
-    set_seed(seed)
+    set_seed(seed) # for sampling method in ling and number.
     
     config = dict(
         seed=seed,
@@ -425,39 +452,50 @@ def main(
         query_peft_dir=query_peft_dir,
         with_classifier=with_classifier,
         batch_size=batch_size,
-        uc_type=uc_type
+        c_type=c_type
     )
     
     if accelerator.is_main_process:
         wandb.config.update(config)
         
-    # loading datasets 
+    ############################# Loading datasets #############################
     if os.path.exists(f'./data/{dataset}'):
         with accelerator.main_process_first():
             data_path = os.listdir(f'./data/{dataset}')
-            new_data_path = []
+            new_data_path = []; rag_data_path = []
             for p in data_path:
-                if p.split('.')[-1] == 'csv':
+                if (p.split('.')[-1] == 'csv') & ('oe' in p):
                     new_data_path.append(p)
                 else:
-                    rag_folder = os.path.join(f'./data/{dataset}', p)
-                    
-        print(new_data_path)
-        all_data = [pd.read_csv(os.path.join(f"./data/{dataset}", p)) for p in new_data_path] 
+                    if retrieval_method in p:
+                        rag_data_path.append(p)
         
-        if (uc_type == 'calibrag') or ("test" in dataset):
-            all_rag_data = [read_json(os.path.join(rag_folder,f"{p.split('.')[0]}.json")) for p in new_data_path]
+        all_data = [pd.read_csv(os.path.join(f"./data/{dataset}", p)) 
+                    for p in new_data_path] 
+        print(f"=====> Loaded datasets: {new_data_path}")
         
+        if (c_type == 'calibrag') or ("test" in dataset):
+            
+            if len(all_data) > 1:
+                def extract_key(filename):
+                    return filename.split('_')[1].split('.')[0]  # 'bioasq', 'mmlu', 'pubmedqa'
+
+                sort_order = [extract_key(name) for name in new_data_path]
+                rag_data_path = sorted(rag_data_path, key=lambda x: sort_order.index(extract_key(x)))
+
+            all_rag_data = [json.load(open(os.path.join(f"./data/{dataset}", p))) 
+                            for p in rag_data_path]
+            
+            print(f"=====> Loaded RAG datasets: {rag_data_path}")
+            
         else:
             all_rag_data = ["" for _ in range(len(all_data))]
     
     else:
         raise FileNotFoundError(f"No files found in the folder: ./data/{dataset}")  
     
-    # loading tokenizer & model
-    tokenizer = create_tokenizer(
-        model_name
-    )
+    ######################## Loading tokenizer & model #########################
+    tokenizer = create_tokenizer(model_name)
     model = create_model(
         model_name,
         tokenizer=tokenizer,
@@ -474,20 +512,22 @@ def main(
         top_p=top_p
     )
     
-    if uc_type == "ling":
+    ############################# Loading PEFT model ###########################
+    ############################# and classifier head ##########################
+    if c_type == "ling":
         
         new_words = ["Unlikely", "Doubtful", "Uncertain", 
                      "Ambiguous", "Probable", "Likely", "Possible", 
                     "Specified","Confirmed", "Certain", "Inevitable"]
         
-        uc_tokens = []
+        c_tokens = []
         for word in new_words:
             tokens = tokenizer.tokenize(word, add_special_tokens=False)
             if len(tokens) > 1:
-                uc_tokens.append(tokens)
+                c_tokens.append(tokens)
             
         tokenizer.add_tokens(new_words)
-        resize_uc_token_embeddings(tokenizer, model, uc_tokens)
+        resize_c_token_embeddings(tokenizer, model, c_tokens)
     
     if query_peft_dir:
         model = get_lora_model(
@@ -509,55 +549,44 @@ def main(
             model.classifier_model = model.classifier_model.to(accelerator.device)
             model.classifier_model.target_layer = -1
         
-    # start generation
+    if c_type == "calibrag":
+        gen_func = partial(calibrag_case,
+                           accelerator=accelerator,
+                           model=model,
+                           tokenizer=tokenizer,
+                           batch_size=batch_size,
+                           generation_config=generation_config,
+                           inference=inference,
+                           top_k=top_k,
+                           medical=medical)
+        
+    elif c_type == "regenerate":
+        gen_func = partial(regenerate_query,
+                           accelerator=accelerator,
+                           model=model,
+                           tokenizer=tokenizer,
+                           batch_size=batch_size,
+                           generation_config=generation_config)
+    else:
+        gen_func = partial(direct_case,
+                           accelerator=accelerator,
+                           model=model,
+                           tokenizer=tokenizer,
+                           batch_size=batch_size,
+                           generation_config=generation_config,
+                           inference=inference,
+                           c_type=c_type,
+                           with_classifier=with_classifier,
+                           medical=medical)
+    
+    ########################### Generating outputs #############################
     model.eval()        
     for data_path, rag_data, data in zip(new_data_path, all_rag_data, all_data):
-        print(uc_type)
-        if uc_type == "calibrag":
-            df = calibrag_case(
-                accelerator,
-                model,
-                tokenizer,
-                data, 
-                batch_size,
-                generation_config,
-                inference,
-                rag_data,
-                top_k=top_k)
-
-            os.makedirs(f"{log_dir}/{dataset}-calibrag", exist_ok=True)
-            df.to_csv(os.path.join(f"{log_dir}/{dataset}-calibrag", data_path)) 
-        
-        elif uc_type == "regenerate":
-            df = regenerate_query(
-                accelerator,
-                model,
-                tokenizer,
-                data, 
-                batch_size,
-                generation_config)
-            
-            os.makedirs(f"{log_dir}/{dataset}-regenerate", exist_ok=True)
-            df.to_csv(os.path.join(f"{log_dir}/{dataset}-regenerate", data_path))
-            
-        else:
-            df = direct_case(
-                accelerator,
-                model,
-                tokenizer,
-                data,
-                batch_size,
-                generation_config,
-                inference,
-                rag_data,
-                uc_type,
-                with_classifier)
-
-            os.makedirs(f"{log_dir}/{dataset}-{uc_type}", exist_ok=True)
-            df.to_csv(os.path.join(f"{log_dir}/{dataset}-{uc_type}", data_path)) 
+        df = gen_func(dataset=data, rag_dataset=rag_data)   
+        os.makedirs(f"{log_dir}/{c_type}/{dataset}-{c_type}", exist_ok=True)
+        df.to_csv(os.path.join(f"{log_dir}/{c_type}/{dataset}-{c_type}", data_path), index=False) 
 
 
 if __name__ == "__main__":
     import fire
-
     fire.Fire(main)

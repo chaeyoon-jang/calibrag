@@ -1,0 +1,1 @@
+python -m experiments.make_decision_vllm --data_dir <YOUR_FILE_DIRECTORY> --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference False

@@ -39,10 +39,9 @@ def generate_outputs(
     tokenizer,
     loader,
     generation_config,
-    base_instruction,
     input_col_name="prompt"):
     
-    collate_fn = LabeledStringDataCollator(tokenizer, base_instruction)
+    collate_fn = LabeledStringDataCollator(tokenizer)
     
     results = []
     for inputs in tqdm(loader):
@@ -74,21 +73,21 @@ def generate_outputs(
     return results
 
 
-def generate_uc_outputs(
+def generate_c_outputs(
     accelerator,
     model,
     tokenizer,
     loader,
-    base_instruction,
-    uc_type,
-    with_classifier=False):
+    c_type,
+    with_classifier=False,
+    input_col_name="prompt"):
     
-    collate_fn = LabeledStringDataCollator(tokenizer, base_instruction)
-    uc_token_vec = get_token_vec(tokenizer, uc_type)
+    collate_fn = LabeledStringDataCollator(tokenizer)
+    uc_token_vec = get_token_vec(tokenizer, c_type)
     
     results = []
     for inputs in tqdm(loader):
-        inputs = inputs['uc_prompt']
+        inputs = inputs[input_col_name]
         inputs = {
             k: v.to(accelerator.device) for k, v in collate_fn(inputs).items()
             }
@@ -116,7 +115,7 @@ def generate_uc_outputs(
         else:
             uc_logits = outputs.logits[..., -1, uc_token_vec]
             
-            if uc_type == "ct":
+            if c_type == "ct":
                 outputs_uc = F.softmax(uc_logits, dim=1)[:,1]
             else:
                 outputs_uc = torch.argmax(uc_logits, dim=-1) 
@@ -138,26 +137,29 @@ def generate_rag_outputs(
     model,
     tokenizer,
     loader,
-    base_instruction,
     temperature=1.0):
     
-    collate_fn = LabeledStringDataCollator(tokenizer, base_instruction)
+    collate_fn = LabeledStringDataCollator(tokenizer)
     
     results = []
     for inputs in tqdm(loader):
         
         inputs = {
-            k: v.to(accelerator.device) for k, v in collate_fn(inputs['output_prompt']).items()
+            k: v.to(accelerator.device) for k, v in collate_fn(inputs['z_prompt']).items()
             }
 
         if isinstance(model, PeftModel):
             model.set_adapter("query")
-
-        with torch.inference_mode():
-            class_inputs = model(**inputs, output_hidden_states=True)
-            class_inputs = class_inputs.hidden_states[-1]
-            class_inputs = class_inputs[..., -1, :]
-
+        
+        try:
+            with torch.inference_mode():
+                class_inputs = model(**inputs, output_hidden_states=True)
+                class_inputs = class_inputs.hidden_states[-2]
+                class_inputs = class_inputs[..., -1, :]
+            
+        except:
+            import ipdb; ipdb.set_trace()
+            
         outputs = model.classifier_model(class_inputs)
         if temperature != 1.0:
             prob = F.softmax(outputs / temperature, dim=1)[:, 1].detach().float().cpu().numpy()

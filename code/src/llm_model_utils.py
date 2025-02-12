@@ -1,11 +1,6 @@
 import torch
-import torch.nn as nn
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.generation.utils import GenerateOutput
 from peft import prepare_model_for_kbit_training
 from transformers import AutoTokenizer, LlamaForCausalLM, AutoModelForCausalLM
-from typing import List, Optional, Tuple, Union
-
 DEFAULT_PAD_TOKEN = "[PAD]"
 
 
@@ -29,6 +24,23 @@ def resize_token_embeddings(tokenizer, model):
         ].mean(dim=0, keepdim=True)
 
 
+def resize_c_token_embeddings(tokenizer, model, uc_tokens):
+    extra_token_count = len(tokenizer) - model.get_input_embeddings().weight.data.size(0)
+
+    if extra_token_count:
+        model.resize_token_embeddings(len(tokenizer))
+
+        input_embeddings = model.get_input_embeddings().weight.data
+        output_embeddings = model.get_output_embeddings().weight.data
+
+        for i, uc_token in enumerate(uc_tokens):
+            uc_token_ids = tokenizer.convert_tokens_to_ids(uc_token)
+            uc_token_embeddings = input_embeddings[uc_token_ids]
+            uc_mean_embedding = uc_token_embeddings.mean(dim=0, keepdim=True)
+            input_embeddings[-extra_token_count+i] = uc_mean_embedding
+            output_embeddings[-extra_token_count+i] = uc_mean_embedding
+            
+            
 def create_tokenizer(
     kind,
     model_dir=None,

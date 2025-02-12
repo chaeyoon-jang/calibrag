@@ -1,15 +1,12 @@
-from enum import Enum
-import dataclasses
-from dataclasses import dataclass, asdict as dataclassasdict
-import torch
 import transformers
-from datasets.formatting.formatting import LazyRow
+from dataclasses import dataclass
+
 import torch
 from torch.utils.data import DataLoader, random_split
 
 IGNORE_LABEL = -100
 
-def get_token_vec(tokenizer, uc_type="number"):
+def get_token_vec(tokenizer, c_type="number"):
     vocab = tokenizer.get_vocab()
 
     def _create_vec(raw_list):
@@ -18,13 +15,13 @@ def get_token_vec(tokenizer, uc_type="number"):
 
         return torch.tensor([tokenizer(t).input_ids[-1] for t in raw_list])
 
-    if uc_type == "ct":
+    if c_type == "ct":
         raw_strings = ["i", "ii"]
         
-    elif uc_type == "number":
+    elif c_type == "number":
         raw_strings=['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
     
-    elif uc_type == "ling":
+    elif c_type == "ling":
         raw_strings = ["Unlikely", "Doubtful", "Uncertain", "Ambiguous", 
                        "Probable", "Likely", "Possible", "Specified",
                        "Confirmed", "Certain", "Inevitable"]
@@ -76,9 +73,11 @@ class LabeledStringDataCollator:
             ]
         
         if targets:
-            prompts = [p + t for p, t in zip(prompts, targets)]
-            
-        inputs = self.tokenizer(prompts, **tokenizer_args)
+            all_prompts = [p + t for p, t in zip(prompts, targets)]
+        else:
+            all_prompts = prompts
+        
+        inputs = self.tokenizer(all_prompts, **tokenizer_args)
         input_lengths = inputs.pop("length")
 
         if targets:
