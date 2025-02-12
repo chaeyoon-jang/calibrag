@@ -3,15 +3,26 @@
 This repository provides the implementation of [Calibrated Decision-Making through LLM-Assisted Retrieval](https://arxiv.org/abs/2411.08891).
 
 ### Abstract
-<sub>Recently, large language models (LLMs) have been increasingly used to support various decision-making tasks, assisting humans in making informed decisions. However, when LLMs confidently provide incorrect information, it can lead humans to make suboptimal decisions. To prevent LLMs from generating incorrect information on topics they are unsure of and to improve the accuracy of generated content, prior works have proposed Retrieval Augmented Generation (RAG), where external documents are referenced to generate responses. However, traditional RAG methods focus only on retrieving documents most relevant to the input query, without specifically aiming to ensure that the human user's decisions are well-calibrated. To address this limitation, we propose a novel retrieval method called Calibrated Retrieval-Augmented Generation (CalibRAG), which ensures that decisions informed by the retrieved documents are well-calibrated. Then we empirically validate that CalibRAG improves calibration performance as well as accuracy, compared to other baselines across various datasets.</sub>
+Recently, large language models (LLMs) have been increasingly used to support various decision-making tasks, assisting humans in making informed decisions. However, when LLMs confidently provide incorrect information, it can lead humans to make suboptimal decisions. To prevent LLMs from generating incorrect information on topics they are unsure of and to improve the accuracy of generated content, prior works have proposed Retrieval Augmented Generation (RAG), where external documents are referenced to generate responses. However, traditional RAG methods focus only on retrieving documents most relevant to the input query, without specifically aiming to ensure that the human user's decisions are well-calibrated. To address this limitation, we propose a novel retrieval method called Calibrated Retrieval-Augmented Generation (CalibRAG), which ensures that decisions informed by the retrieved documents are well-calibrated. Then we empirically validate that CalibRAG improves calibration performance as well as accuracy, compared to other baselines across various datasets.
 
 ---
 
-## **Prerequisites**
+## ✅ **Prerequisites**
 
 All experiments were conducted on a single NVIDIA RTX A6000 GPU.
 
 ```bash
+# Clone the repository
+git clone https://github.com/chaeyoon-jang/calibrag.git
+cd calibrag
+
+# Install Git LFS
+git lfs install
+
+# Pull large files managed by Git LFS
+git lfs pull
+
+# Set up the environment
 cd code
 conda create -n calibrag python=3.9 -y
 conda activate calibrag
@@ -20,7 +31,7 @@ pip install -r requirements.txt
 
 ---
 
-## **Synthetic Data Generation**
+## ✅ **Synthetic Data Generation**
 
 ### **1. Create Open-ended Questions**
 ```bash
@@ -64,16 +75,11 @@ For CalibRAG,
 sh scripts/calibrag_api.sh
 ```
 
-<p>
-  Access the finalized data files here: 
-  <a href="https://huggingface.co/datasets/yuntokki/calibrag">
-    <img src="https://huggingface.co/front/assets/huggingface_logo.svg" alt="Hugging Face" style="width: 20px; vertical-align: middle;"> CalibRAG
-  </a>
-</p>
+📂 **Finalized Dataset**: The finalized dataset is available in the `data/dev` directory within the repository after cloning with `git-lfs`.
 
 ---
 
-## **Training Methods**
+## ✅ **Training Methods**
 
 ### **1. CT-LoRA**
 ```bash
@@ -120,7 +126,7 @@ python -m experiments.train.train_calibrag \
 
 ---
 
-## **Test Data Generation**
+## ✅ **Test Data Generation**
 
 ### **1. Create Open-ended Questions**
 ```bash
