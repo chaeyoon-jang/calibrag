@@ -170,7 +170,7 @@ sh scripts/calibrag_api.sh
 
 ---
 
-## **References**
+## ✅ **References**
 ```bash
 https://github.com/facebookresearch/contriever
 https://github.com/tatsu-lab/linguistic_calibration
