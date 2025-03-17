@@ -181,7 +181,8 @@ def main(
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens,
         temperature=temperature,
-        top_p=top_p
+        top_p=top_p,
+        seed=seed
     )
     
     ########################### Generating outputs #############################     

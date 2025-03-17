@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import default_collate
 
+from transformers import set_seed
+
 from transformers.trainer import (
     TRAINING_ARGS_NAME,
     logger,
@@ -225,6 +227,9 @@ def main(
     max_steps=5000,
     gradient_accumulation_steps=1,
 ):
+    
+    set_seed(seed)
+    
     accelerator = AcceleratorState()
 
     trainer_args = ClassificationTuner.Args(
