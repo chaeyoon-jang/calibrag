@@ -253,7 +253,7 @@ def main(
     seed=137,
     log_dir=None,
     dataset=None,
-    data_dir="data/processed",
+    data_dir="data/dev/processed",
     prompt_style=None,
     max_token_length=None,
     num_workers=4,
@@ -374,5 +374,13 @@ def main(
     trainer.train()
 
 if __name__ == "__main__":
+    import os 
+    os.environ['WANDB_PROJECT'] = 'calibrag_neurips'
+    
+    #import wandb
+    #api = wandb.Api()
+    #run = api.run("chaeyoon-jang/calibrag_neurips/vbdwtp3t")
+    #run.delete()
+    
     import fire
     fire.Fire(main)

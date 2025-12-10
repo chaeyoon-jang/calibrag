@@ -57,7 +57,7 @@ def parse_args():
         description='Retrieval for open-ended query.')
     parser.add_argument('--num_retrieval',
                         type=int,
-                        default=20)
+                        default=40)
     parser.add_argument('--data_name',
                         type=str,
                         default='oe_base_train')

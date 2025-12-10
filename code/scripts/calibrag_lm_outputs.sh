@@ -1,1 +1,1 @@
-python -m experiments.make_lm_outputs --batch_size 16 --max_new_tokens 50 --model_name "Meta-Llama-3.1-8B-Instruct" --inference False --c_type "calibrag" --seed 0 --retrieval_method "contriever"
+python -m experiments.make_lm_outputs --batch_size 16 --max_new_tokens 50 --model_name "Meta-Llama-3.1-8B-Instruct" --inference False --c_type "calibrag" --seed 0 --retrieval_method "bm25"

@@ -1,9 +1,9 @@
 # **Calibrated Decision-Making through Large LLM-Assisted Retrieval**
 
-This repository provides the implementation of [Calibrated Decision-Making through LLM-Assisted Retrieval](https://arxiv.org/abs/2411.08891).
+This repository provides the implementation of [Reliable Decision Making via Calibration Oriented Retrieval Augmented Generation](https://arxiv.org/abs/2411.08891) (Accepted by **NeurIPS 2025**).
 
 ### Abstract
-Recently, large language models (LLMs) have been increasingly used to support various decision-making tasks, assisting humans in making informed decisions. However, when LLMs confidently provide incorrect information, it can lead humans to make suboptimal decisions. To prevent LLMs from generating incorrect information on topics they are unsure of and to improve the accuracy of generated content, prior works have proposed Retrieval Augmented Generation (RAG), where external documents are referenced to generate responses. However, traditional RAG methods focus only on retrieving documents most relevant to the input query, without specifically aiming to ensure that the human user's decisions are well-calibrated. To address this limitation, we propose a novel retrieval method called Calibrated Retrieval-Augmented Generation (CalibRAG), which ensures that decisions informed by the retrieved documents are well-calibrated. Then we empirically validate that CalibRAG improves calibration performance as well as accuracy, compared to other baselines across various datasets.
+Recently, Large Language Models (LLMs) have been increasingly used to support various decision-making tasks, assisting humans in making informed decisions. However, when LLMs confidently provide incorrect information, it can lead humans to make suboptimal decisions. To prevent LLMs from generating incorrect information on topics they are unsure of and to improve the accuracy of generated content, prior works have proposed Retrieval Augmented Generation (RAG), where external documents are referenced to generate responses. However, previous RAG methods focus only on retrieving documents most relevant to the input query, without specifically aiming to ensure that the human user's decisions are well-calibrated. To address this limitation, we propose a novel retrieval method called Calibrated Retrieval-Augmented Generation (CalibRAG), which ensures that decisions informed by RAG are well-calibrated. Then we empirically validate that CalibRAG improves calibration performance as well as accuracy, compared to other baselines across various datasets.
 
 ---
 
@@ -176,4 +176,14 @@ https://github.com/facebookresearch/contriever
 https://github.com/tatsu-lab/linguistic_calibration
 https://github.com/activatedgeek/calibration-tuning
 https://github.com/esteng/pragmatic_calibration
+```
+
+## ✅ Citation
+```bash
+@inproceedings{jang2025reliable,
+  title={Reliable Decision-Making via Calibration-Oriented Retrieval-Augmented Generation},
+  author={Jang, Chaeyun and Cho, Deukhwan and Lee, Seanie and Lee, Hyungi and Lee, Juho},
+  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+  year={2025}
+}
 ```

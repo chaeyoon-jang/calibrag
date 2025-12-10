@@ -1,0 +1,4 @@
+#python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_calibrag_best_2/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct"
+#python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_calibrag_best_3/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct"
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_number_best_2/decision" --type "eval" --batch_size 48 --multiple False --c_type "number"
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_number_best_3/decision" --type "eval" --batch_size 48 --multiple False --c_type "number"

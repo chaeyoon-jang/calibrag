@@ -58,6 +58,16 @@ def create_tokenizer(
             **kwargs,
         )
     
+    if "qwen" in kind.lower():
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir or f"{kind}",
+            padding_side=padding_side,
+            model_max_length=model_max_length,
+            use_fast=True,
+            legacy=False,
+            **kwargs,
+        )
+    
     else:
         tokenizer = AutoTokenizer.from_pretrained(
             model_dir or f"meta-llama/{kind}",
@@ -127,3 +137,10 @@ def create_tokenizer_and_model(kind, tokenizer_args=None, **kwargs):
     tokenizer = create_tokenizer(kind, **(tokenizer_args or dict()))
     model = create_model(kind, tokenizer=tokenizer, **kwargs)
     return tokenizer, model
+
+from collections import Counter
+def compute_class_weights(train_dataset, num_classes=11):
+    label_counts = Counter(train_dataset['correct'])
+    total = sum(label_counts.values())
+    weights = [total / (num_classes * label_counts.get(i, 1)) for i in range(num_classes)]
+    return torch.tensor(weights, dtype=torch.float)

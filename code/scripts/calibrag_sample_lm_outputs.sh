@@ -1,0 +1,1 @@
+python -m experiments.make_label_sample --batch_size 16 --max_new_tokens 50 --model_name "Meta-Llama-3.1-8B-Instruct" --c_type "calibrag" --retrieval_method "bm25"

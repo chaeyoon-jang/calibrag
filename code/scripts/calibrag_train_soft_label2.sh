@@ -1,0 +1,3 @@
+python -m experiments.train.train_calibrag_soft --temp_pos_enc True --batch_size 2 --gradient_accumulation_steps 2 --with_lora True --max_steps 20000 --seed 0 
+python -m experiments.train.train_calibrag_soft --temp_pos_enc True --batch_size 2 --gradient_accumulation_steps 2 --with_lora True --max_steps 20000 --seed 1
+python -m experiments.train.train_calibrag_soft --temp_pos_enc True --batch_size 2 --gradient_accumulation_steps 2 --with_lora True --max_steps 20000 --seed 2 

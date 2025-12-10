@@ -1,0 +1,1 @@
+python -m experiments.make_embeddings --batch_size 16 --dataset "test" --model_name "Meta-Llama-3.1-8B-Instruct" --retrieval_method "bm25"

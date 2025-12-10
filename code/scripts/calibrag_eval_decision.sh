@@ -1,1 +1,2 @@
-python -m experiments.make_decision_vllm --data_dir <YOUR_FILE_DIRECTORY> --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference True
+#python -m experiments.make_decision_vllm --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/contriever_soft_label_medical/calibrag/test-med-calibrag" --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference True --do_sample False 
+python -m experiments.make_decision_vllm --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/bm25_soft_label/calibrag/test-calibrag" --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference True --do_sample False

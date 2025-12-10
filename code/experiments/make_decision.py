@@ -97,7 +97,7 @@ def decision_generate(
     return dataset
 
 
-@entrypoint(with_accelerator=True)
+@entrypoint(with_accelerator=True, with_wandb=False)
 def main(
     seed: int = 0,
     accelerator = None,

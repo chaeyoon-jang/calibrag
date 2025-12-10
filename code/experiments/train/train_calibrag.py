@@ -27,7 +27,8 @@ from src.logging import (
 from src.distributed import AcceleratorState
 from src.llm_model_utils import (
     create_model,
-    create_tokenizer
+    create_tokenizer,
+    compute_class_weights
 )
 from src.peft_utils import (
     get_lora_model,
@@ -58,6 +59,9 @@ class ClassificationTuner(Trainer):
         ## Custom Args.
         target_layer: int = field(default=-2)
         with_lora: bool = field(default=False)
+        class_weights: list = field(default=None)
+        temp_pos_enc: bool = field(default=False)
+        temp_text: bool = field(default=False)
 
     def __init__(
         self,
@@ -110,12 +114,29 @@ class ClassificationTuner(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
         
         class_labels = inputs['correct']
-        inputs = inputs['z_prompt']     
-           
+        if self.args.temp_pos_enc or self.args.temp_text:
+            temperature = inputs['temperature']
+        
+        if self.args.temp_text:
+            z_prompts = inputs['z_prompt']
+            inputs = [
+                z_prompt.replace("Answer:", f"Temperature: {t:.4f}\nAnswer:")
+                for z_prompt, t in zip(z_prompts, temperature)
+            ]
+        else:
+            inputs = inputs['z_prompt']
+        
         class_inputs = self.prepare_class_inputs(model, inputs)
-
-        class_logits = self.classifier_model(class_inputs)
-        loss = F.cross_entropy(class_logits, class_labels)
+        if self.args.temp_pos_enc:
+            class_logits = self.classifier_model(class_inputs, temperature)
+        else:
+            class_logits = self.classifier_model(class_inputs)
+            
+        if hasattr(self.args, "class_weights") and self.args.class_weights is not None:
+            weight_tensor = torch.tensor(self.args.class_weights, device=class_logits.device)
+            loss = F.cross_entropy(class_logits, class_labels, weight=weight_tensor)
+        else:
+            loss = F.cross_entropy(class_logits, class_labels)
 
         loss_metrics = {
             "class_loss": loss.detach().item(),
@@ -137,13 +158,25 @@ class ClassificationTuner(Trainer):
         for inputs in tqdm(eval_dataloader, leave=False):
             
             class_labels = inputs['correct']
-            inputs = inputs['z_prompt']
             
+            if self.args.temp_text:
+                z_prompts = inputs["z_prompt"]
+                temperatures = inputs["temperature"]
+                prompts = [
+                    z_prompt.replace("Answer:", f"Temperature: {t:.4f}\nAnswer:")
+                    for z_prompt, t in zip(z_prompts, temperatures)
+                ]
+            else:
+                prompts = inputs["z_prompt"]
+
             class_inputs = self.prepare_class_inputs(
-                self.model, inputs, eval_mode=True
+                self.model, prompts, eval_mode=True
             )
 
-            class_logits = self.classifier_model(class_inputs)
+            if self.args.temp_pos_enc:
+                class_logits = self.classifier_model(class_inputs, inputs["temperature"])
+            else:
+                class_logits = self.classifier_model(class_inputs)
 
             [
                 l.append(v)
@@ -227,7 +260,7 @@ def main(
     seed=137,
     log_dir=None,
     dataset=None,
-    data_dir="./data/processed/calibrag/bm25",
+    data_dir="./data/dev/processed/calibrag/bm25",
     input_prediction=False,
     max_token_length=None,
     num_workers=4,
@@ -243,11 +276,26 @@ def main(
     lr=1e-4,
     max_steps=10000,
     gradient_accumulation_steps=1,
+    temp_pos_enc=False,
+    temp_text=False,
 ):
     
     set_seed(seed)
     
     accelerator = AcceleratorState()
+    
+    weighted = True if (temp_pos_enc or temp_text) else False
+    
+    with accelerator.main_process_first():        
+        data_path = f"{data_dir}/temperature" if (weighted) else data_dir
+        train_data = pd.read_csv(os.path.join(data_path, "train.csv"))
+        train_data = train_data.sample(frac=1, random_state=seed).reset_index(drop=True)
+        valid_data = pd.read_csv(os.path.join(data_path, "valid.csv"))
+
+        train_data = Dataset.from_pandas(train_data)
+        valid_data = Dataset.from_pandas(valid_data)
+    
+    weights = compute_class_weights(train_data, num_classes=11) if weighted else None
 
     trainer_args = ClassificationTuner.Args(
         seed=seed,
@@ -263,15 +311,10 @@ def main(
         warmup_ratio=warmup_ratio,
         with_lora=with_lora,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        class_weights=weights.tolist() if weights is not None else None,
+        temp_pos_enc=temp_pos_enc,
+        temp_text=temp_text,
     )
-
-    with accelerator.main_process_first():
-        train_data = pd.read_csv(os.path.join(f"{data_dir}", "train.csv"))
-        train_data = train_data.sample(frac=1, random_state=seed).reset_index(drop=True)
-        valid_data = pd.read_csv(os.path.join(f"{data_dir}", "valid.csv"))
-
-        train_data = Dataset.from_pandas(train_data)
-        valid_data = Dataset.from_pandas(valid_data)
         
     tokenizer = create_tokenizer(model_name)
     
@@ -291,13 +334,25 @@ def main(
         is_trainable=with_lora,
         adapter_name="default",
     )
-
-    classifier_model = get_classifier_head(
-        input_size=model.config.hidden_size,
-        checkpoint_dir=peft_dir,
-        is_trainable=True,
-        weights_name=ClassificationTuner.WEIGHTS_NAME,
-    )
+    
+    if temp_pos_enc:
+        classifier_model = get_classifier_head(
+            input_size=model.config.hidden_size,
+            classifier_model_name="fourier",
+            checkpoint_dir=peft_dir,
+            is_trainable=True,
+            weights_name=ClassificationTuner.WEIGHTS_NAME,
+            output_size= 11,
+        )
+    
+    else:
+        classifier_model = get_classifier_head(
+            input_size=model.config.hidden_size,
+            checkpoint_dir=peft_dir,
+            is_trainable=True,
+            weights_name=ClassificationTuner.WEIGHTS_NAME,
+            output_size= 11 if (weighted) else 2,
+        )
 
     model.classifier_model = classifier_model.to(model.dtype)
 
@@ -325,6 +380,8 @@ def main(
 
 
 if __name__ == "__main__":
+    import os 
+    os.environ['WANDB_PROJECT'] = 'calibrag_neurips'
+    
     import fire
-
     fire.Fire(main)

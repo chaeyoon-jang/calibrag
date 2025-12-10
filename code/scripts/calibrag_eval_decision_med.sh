@@ -1,0 +1,1 @@
+python -m experiments.make_decision_vllm --data_dir "/mnt/home/chaeyun-jang/critical_token/calibrag/code/logs/calibrag_decision_bm25/decision" --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference True --do_sample False 

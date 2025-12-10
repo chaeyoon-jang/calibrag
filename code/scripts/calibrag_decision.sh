@@ -1,1 +1,1 @@
-python -m experiments.make_decision_vllm --data_dir <YOUR_FILE_DIRECTORY> --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference False
+python -m experiments.make_decision_vllm --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/number_bm25_best_2/number/test-number" --batch_size 32 --max_new_tokens 50 --model_name "meta-llama/Meta-Llama-3.1-8B-Instruct" --inference False --log_dir ./logs/decision_number_best_2

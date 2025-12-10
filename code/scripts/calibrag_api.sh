@@ -1,1 +1,6 @@
-python -m experiments.api --data_dir <YOUR_FILE_DIRECTORY> --type "eval" --batch_size 48 --multiple False
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_bm25_5/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct" --log_dir "./logs/calibrag_bm25_5"
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_bm25_10/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct" --log_dir "./logs/calibrag_bm25_10"
+
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_contriever_5/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct" --log_dir "./logs/calibrag_contriever_5"
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_contriever_10/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct" --log_dir "./logs/calibrag_contriever_10"
+python -m experiments.api --data_dir "/mnt/home/chaeyun-jang/calibrag/code/logs/decision_contriever_40_s/decision" --type "eval" --batch_size 48 --multiple False --c_type "ct" --log_dir "./logs/calibrag_contriever_40_s"

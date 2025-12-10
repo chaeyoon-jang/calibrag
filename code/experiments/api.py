@@ -4,7 +4,6 @@ import wandb
 import pandas as pd
 from tqdm import tqdm
 from datasets import Dataset
-from g4f.client import Client
 from openai import OpenAI, APIError
 from concurrent.futures import ThreadPoolExecutor
 
@@ -33,10 +32,7 @@ def openai_query(
     openai_model_name="gpt-3.5-turbo",
     max_tokens=40):
     
-    if openai_model_name == "gpt-3.5-turbo":
-        client = Client()
-    else:
-        client = OpenAI()
+    client = OpenAI()
        
     sampled_response = None
     while sampled_response is None:
@@ -134,6 +130,32 @@ def grade_oe_preds(
     return results
 
 
+def eval_using_vllm(
+    true,
+    pred,
+    questions,
+    tokenizer, 
+    model,
+    sampling_params):
+
+    inputs = [EVALUATION_PROMPT.replace("<ground-truth>", ground_truth)
+              .replace("<prediction>", prediction)
+              .replace("<question>", question)
+              for ground_truth, prediction, question in zip(true, pred, questions)]
+    inputs = [tokenizer.apply_chat_template(
+        [{"role": "user", "content": inp}],
+        tokenize=True,
+        add_generation_prompt=True) for inp in inputs]
+    
+    outputs = model.generate(
+        inputs,
+        sampling_params,
+        use_tqdm=False)
+    outputs = [outputs[i].outputs[0].text for i in range(len(outputs))]
+    outputs = ["yes" in sampled_response.strip().lower() for sampled_response in outputs]
+    return outputs
+    
+    
 def generate_oe_queries(
     questions,
     max_threads=50,
@@ -168,7 +190,16 @@ def evaluate_all_metrics(data, c_type):
         y_prob  = [uc_to_number[n]/10 for n in list(new['c'])]
     
     elif c_type == "number":
-        y_prob  = [float(n.split(' (')[0])/10 for n in list(new['c'])] 
+        import numpy as np 
+        bins = np.linspace(0, 1, 12)
+        avg_bins = [(bins[i] + bins[i+1])/2 for i in range(len(bins)-1)]
+        y_prob = []
+        for n in list(new['c']):
+            val = float(n)
+            if val.is_integer():
+                y_prob.append(avg_bins[int(val)])
+            else:
+                y_prob.append(val / 10)
         
     else:
         try:
@@ -191,7 +222,7 @@ def evaluate_all_metrics(data, c_type):
     return auroc, acc, ece, brier_score, nll
         
 
-@entrypoint(with_accelerator=True)
+@entrypoint(with_accelerator=False)
 def main(
     type="eval",
     data_dir=None,
@@ -207,8 +238,7 @@ def main(
     print(log_dir)
     
     if os.path.exists(data_dir):
-        with accelerator.main_process_first():
-            all_data_path = os.listdir(data_dir)
+        all_data_path = os.listdir(data_dir)
         print(all_data_path)       
         all_data = [pd.read_csv(os.path.join(data_dir, p))
                     .dropna().reset_index(drop=True) for p in all_data_path] 
@@ -216,6 +246,19 @@ def main(
     else:
         raise FileNotFoundError(f"No files found in the folder: {data_dir}")
     
+    if strategy == "vllm":
+        from vllm import LLM, SamplingParams
+        from transformers import AutoTokenizer
+    
+        sampling_params = SamplingParams(
+            max_tokens = 20,
+            temperature = 0.0,
+            top_p = 1.0,
+            seed = 0
+        )
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
+        model = LLM(model="meta-llama/Llama-3.1-8B-Instruct")
+        
     if type == "eval":
         for data_path, data in zip(all_data_path, all_data):
             
@@ -241,12 +284,20 @@ def main(
                         outputs = [inp.pop("y_pred") for inp in inputs] 
                         
                     questions = [inp.pop("x") for inp in inputs]
-        
-                    result = grade_oe_preds(targets,
-                                            outputs,
-                                            questions,
-                                            strategy,
-                                            max_tokens)
+                    
+                    if strategy == "vllm":
+                        result = eval_using_vllm(targets,
+                                                outputs,
+                                                questions,
+                                                tokenizer,
+                                                model,
+                                                sampling_params)
+                    else:
+                        result = grade_oe_preds(targets,
+                                                outputs,
+                                                questions,
+                                                strategy,
+                                                max_tokens)
                     results.extend(result)
                                 
                 data['correct'] = results

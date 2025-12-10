@@ -210,7 +210,7 @@ def main(
     seed=137,
     log_dir=None,
     dataset=None,
-    data_dir="data/processed",
+    data_dir="data/dev/processed",
     prompt_style=None,
     max_token_length=None,
     num_workers=4,
@@ -311,6 +311,8 @@ def main(
 
 
 if __name__ == "__main__":
-    import fire
+    import os 
+    os.environ['WANDB_PROJECT'] = 'calibrag_neurips'    
 
+    import fire
     fire.Fire(main)
