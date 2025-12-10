@@ -1,4 +1,4 @@
-# **Calibrated Decision-Making through Large LLM-Assisted Retrieval**
+# **Reliable Decision Making via Calibration Oriented Retrieval Augmented Generation**
 
 This repository provides the implementation of [Reliable Decision Making via Calibration Oriented Retrieval Augmented Generation](https://arxiv.org/abs/2411.08891) (Accepted by **NeurIPS 2025**).
 
